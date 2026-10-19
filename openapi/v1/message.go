@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 
 	"github.com/go-resty/resty/v2"
@@ -96,7 +97,7 @@ func (o *openAPI) RetractMessage(ctx context.Context,
 	channelID, msgID string, opt ...options.Option) error {
 	reqCMD := o.request(ctx).
 		SetPathParam("channel_id", channelID).
-		SetPathParam("message_id", string(msgID))
+		SetPathParam("message_id", msgID)
 
 	_, err := baseRequest(ctx, reqCMD, http.MethodDelete, o.getURL(messageURI), opt...)
 	return err
@@ -206,6 +207,53 @@ func (o *openAPI) PostGroupFile(ctx context.Context, groupID string,
 		return nil, err
 	}
 	return resp.Result().(*dto.Media), nil
+}
+
+// PostFormFileImage 频道图片表单上传。
+func (o *openAPI) PostFormFileImage(
+	ctx context.Context, channelID string, m map[string]string, path string,
+) (*dto.Message, error) {
+	resp, err := o.request(ctx).
+		SetResult(dto.Message{}).
+		SetPathParam("channel_id", channelID).
+		SetFormData(m).
+		SetFile("file_image", path).
+		Post(o.getURL(messagesURI))
+	if err != nil {
+		return nil, err
+	}
+	return resp.Result().(*dto.Message), nil
+}
+
+// PostFormFileReaderImage 频道图片表单上传（Reader）。
+func (o *openAPI) PostFormFileReaderImage(
+	ctx context.Context, channelID string, m map[string]string, filename string, r io.Reader,
+) (*dto.Message, error) {
+	resp, err := o.request(ctx).
+		SetResult(dto.Message{}).
+		SetPathParam("channel_id", channelID).
+		SetFormData(m).
+		SetFileReader("file_image", filename, r).
+		Post(o.getURL(messagesURI))
+	if err != nil {
+		return nil, err
+	}
+	return resp.Result().(*dto.Message), nil
+}
+
+// PostStreamMessage 流式发送单聊消息。
+func (o *openAPI) PostStreamMessage(
+	ctx context.Context, userOpenID string, msg *dto.StreamMessageToCreate,
+) (*dto.StreamMessageResp, error) {
+	resp, err := o.request(ctx).
+		SetResult(dto.StreamMessageResp{}).
+		SetPathParam("user_openid", userOpenID).
+		SetBody(msg).
+		Post(o.getURL(streamMessagesURI))
+	if err != nil {
+		return nil, err
+	}
+	return resp.Result().(*dto.StreamMessageResp), nil
 }
 
 func baseRequest(ctx context.Context, reqCMD *resty.Request, method, url string, opt ...options.Option) (

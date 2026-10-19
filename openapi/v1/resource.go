@@ -1,4 +1,4 @@
-﻿package v1
+package v1
 
 import (
 	"fmt"
@@ -33,13 +33,19 @@ const (
 	retractC2cMessageURI   uri = "/v2/users/{user_id}/messages/{message_id}"
 	retractGroupMessageURI uri = "/v2/groups/{group_id}/messages/{message_id}"
 
+	groupMembersURI   uri = "/v2/groups/{group_openid}/members"
+	groupMemberURI    uri = "/v2/groups/{group_openid}/members/{member_openid}"
+	groupInfoURI      uri = "/v2/groups/{group_openid}/info"
+	groupBotStateURI  uri = "/v2/groups/{group_openid}/bot_state"
+	streamMessagesURI uri = "/v2/users/{user_openid}/stream_messages"
+
 	messageURI uri = "/channels/{channel_id}/messages/{message_id}"
 
 	userMeURI       uri = "/users/@me"
 	userMeGuildsURI uri = "/users/@me/guilds"
 	userMeDMURI     uri = "/users/@me/dms"
 
-	gatewayURI    uri = "/gateway" // nolint
+	gatewayURI    uri = "/gateway"
 	gatewayBotURI uri = "/gateway/bot"
 
 	audioControlURI uri = "/channels/{channel_id}/audio"
@@ -81,18 +87,6 @@ const (
 
 	settingGuideURI   uri = "/channels/{channel_id}/settingguide"
 	dmSettingGuideURI uri = "/dms/{guild_id}/settingguide"
-
-	// 私聊
-	userMessageURI uri = "/v2/users/{openid}/messages"
-	userFileURI    uri = "/v2/users/{openid}/files"
-
-	// 群聊
-	groupMessageURI uri = "/v2/groups/{group_openid}/messages"
-	groupFileURI    uri = "/v2/groups/{group_openid}/files"
-	groupMember     uri = "/v2/groups/{group_openid}/members"
-
-	// 频道
-	channelMessageURI uri = "/channels/{channel_id}/messages"
 )
 
 // getURL 获取接口地址，会处理沙箱环境判断

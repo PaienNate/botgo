@@ -2,11 +2,13 @@ package openapi
 
 import (
 	"context"
+	"io"
 	"time"
+
+	"golang.org/x/oauth2"
 
 	"github.com/sealdice/botgo/dto"
 	"github.com/sealdice/botgo/openapi/options"
-	"golang.org/x/oauth2"
 )
 
 // OpenAPI openapi 完整实现
@@ -292,4 +294,37 @@ type WebhookAPI interface {
 // MessageSettingAPI 频道消息设置接口
 type MessageSettingAPI interface {
 	GetMessageSetting(ctx context.Context, guildID string) (*dto.MessageSetting, error)
+}
+
+// GroupAPI 群信息/群成员接口。
+// 这是一个可选扩展接口，没有合入 OpenAPI，避免破坏第三方对 OpenAPI 的实现。
+// 使用方式：
+//
+//	if g, ok := api.(openapi.GroupAPI); ok { g.GetGroupMembers(...) }
+type GroupAPI interface {
+	// GetGroupMembers 获取群成员列表，cursor 为空表示第一页
+	GetGroupMembers(ctx context.Context, groupOpenID, cursor string) (*dto.GetGroupMembersResp, error)
+	// GetGroupMember 获取群成员信息
+	GetGroupMember(ctx context.Context, groupOpenID, memberOpenID string) (*dto.GroupMember, error)
+	// GetGroupInfo 获取群基本信息
+	GetGroupInfo(ctx context.Context, groupOpenID string) (*dto.GroupInfo, error)
+	// GetBotState 获取机器人群内状态
+	GetBotState(ctx context.Context, groupOpenID string) (*dto.GroupBotState, error)
+}
+
+// FormFileAPI 频道图片表单上传接口（可选扩展，未合入 OpenAPI）。
+type FormFileAPI interface {
+	// PostFormFileImage 频道图片表单上传
+	PostFormFileImage(ctx context.Context, channelID string, m map[string]string, path string) (*dto.Message, error)
+	// PostFormFileReaderImage 频道图片表单上传（Reader）
+	PostFormFileReaderImage(
+		ctx context.Context, channelID string, m map[string]string, filename string, r io.Reader,
+	) (*dto.Message, error)
+}
+
+// StreamMessageAPI 流式消息接口（可选扩展，未合入 OpenAPI）。
+type StreamMessageAPI interface {
+	// PostStreamMessage 流式发送单聊消息
+	PostStreamMessage(ctx context.Context, userOpenID string, msg *dto.StreamMessageToCreate) (
+		*dto.StreamMessageResp, error)
 }
