@@ -86,6 +86,11 @@ func (o *openAPI) setupClient(appID string) {
 		SetLogger(log.DefaultLogger).
 		SetDebug(o.debug).
 		SetTimeout(o.timeout).
+		SetRetryCount(1).
+		AddRetryCondition(func(resp *resty.Response, _ error) bool {
+			// 11244: token 过期/不存在，强制刷新后重试一次。
+			return isTokenExpiredResponse(resp)
+		}).
 		SetHeader("User-Agent", version.String()).
 		SetHeader("X-Union-Appid", appID).
 		SetPreRequestHook(
@@ -164,9 +169,30 @@ func (o *openAPI) handleError(resp *resty.Response) {
 		return
 	}
 	if b.ErrCode == errs.APICodeTokenExpireOrNotExist || b.Code == errs.APICodeTokenExpireOrNotExist {
-		log.Errorf("token expire or not exist, update token")
-		_, _ = o.tokenSource.Token()
+		log.Errorf("token expire or not exist, force refresh token")
+		forceRefreshToken(o.tokenSource)
 	}
+}
+
+func isTokenExpiredResponse(resp *resty.Response) bool {
+	if resp == nil {
+		return false
+	}
+	var b errBody
+	if err := json.Unmarshal(resp.Body(), &b); err != nil {
+		return false
+	}
+	return b.ErrCode == errs.APICodeTokenExpireOrNotExist || b.Code == errs.APICodeTokenExpireOrNotExist
+}
+
+func forceRefreshToken(tokenSource oauth2.TokenSource) {
+	if refreshable, ok := tokenSource.(interface {
+		ForceRefresh() (*oauth2.Token, error)
+	}); ok {
+		_, _ = refreshable.ForceRefresh()
+		return
+	}
+	_, _ = tokenSource.Token()
 }
 
 // respInfo 用于输出日志的时候格式化数据
