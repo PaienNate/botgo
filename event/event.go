@@ -11,6 +11,8 @@ import (
 )
 
 var eventParseFuncMapLock = new(sync.RWMutex)
+
+//nolint:exhaustive // 只处理 dispatch opcode
 var eventParseFuncMap = map[dto.OPCode]map[dto.EventType]eventParseFunc{
 	dto.WSDispatchEvent: {
 		dto.EventGuildCreate: guildHandler,
@@ -65,6 +67,11 @@ var eventParseFuncMap = map[dto.OPCode]map[dto.EventType]eventParseFunc{
 		dto.EventGroupDelRobot:        groupDelRobotHandler,
 		dto.EventGroupMemberAdd:       groupMemberAddHandler,
 		dto.EventGroupMemberRemove:    groupMemberRemoveHandler,
+		dto.EventGroupJoinRequest:     groupJoinRequestHandler,
+		dto.EventGroupMsgReceive:      groupMsgReceiveHandler,
+		dto.EventGroupMsgReject:       groupMsgRejectHandler,
+		dto.EventC2CMsgReceive:        c2cMsgReceiveHandler,
+		dto.EventC2CMsgReject:         c2cMsgRejectHandler,
 		dto.EventEnterAIO:             enterAIOHandler,
 	},
 }
@@ -89,7 +96,110 @@ func getHandler(opCode dto.OPCode, eventType dto.EventType) (eventParseFunc, boo
 type eventParseFunc func(event *dto.WSPayload, message []byte) error
 
 // ParseAndHandle 处理回调事件
+// Filter 事件过滤器。返回 false 时该事件不会继续投递。
+type Filter func(payload *dto.WSPayload) bool
+
+// Observer 事件观察者。用于转发、指标、日志等旁路逻辑。
+type Observer func(payload *dto.WSPayload)
+
+type filterEntry struct {
+	id uint64
+	fn Filter
+}
+
+type observerEntry struct {
+	id uint64
+	fn Observer
+}
+
+var (
+	filterMu    sync.RWMutex
+	filterSeq   uint64
+	filters     []filterEntry
+	observerMu  sync.RWMutex
+	observerSeq uint64
+	observers   []observerEntry
+)
+
+// RegisterFilter 注册事件过滤器，返回取消函数。
+func RegisterFilter(f Filter) func() {
+	if f == nil {
+		return func() {}
+	}
+	filterMu.Lock()
+	filterSeq++
+	id := filterSeq
+	filters = append(filters, filterEntry{id: id, fn: f})
+	filterMu.Unlock()
+	return func() {
+		filterMu.Lock()
+		defer filterMu.Unlock()
+		for i, entry := range filters {
+			if entry.id == id {
+				filters = append(filters[:i], filters[i+1:]...)
+				return
+			}
+		}
+	}
+}
+
+// RegisterObserver 注册事件观察者，返回取消函数。
+func RegisterObserver(o Observer) func() {
+	if o == nil {
+		return func() {}
+	}
+	observerMu.Lock()
+	observerSeq++
+	id := observerSeq
+	observers = append(observers, observerEntry{id: id, fn: o})
+	observerMu.Unlock()
+	return func() {
+		observerMu.Lock()
+		defer observerMu.Unlock()
+		for i, entry := range observers {
+			if entry.id == id {
+				observers = append(observers[:i], observers[i+1:]...)
+				return
+			}
+		}
+	}
+}
+
+func applyFilters(payload *dto.WSPayload) bool {
+	filterMu.RLock()
+	snapshot := append([]filterEntry(nil), filters...)
+	filterMu.RUnlock()
+	for _, entry := range snapshot {
+		ok := false
+		func() {
+			defer func() { _ = recover() }()
+			ok = entry.fn(payload)
+		}()
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func notifyObservers(payload *dto.WSPayload) {
+	observerMu.RLock()
+	snapshot := append([]observerEntry(nil), observers...)
+	observerMu.RUnlock()
+	for _, entry := range snapshot {
+		func() {
+			defer func() { _ = recover() }()
+			entry.fn(payload)
+		}()
+	}
+}
+
 func ParseAndHandle(payload *dto.WSPayload) error {
+	if !applyFilters(payload) {
+		return nil
+	}
+	notifyObservers(payload)
+
 	// 指定类型的handler
 	if h, ok := getHandler(payload.OPCode, payload.Type); ok {
 		return h(payload, payload.RawMessage)
@@ -452,6 +562,66 @@ func groupMemberRemoveHandler(payload *dto.WSPayload, message []byte) error {
 	h := getHandlers(payload)
 	if h.GroupMemberRemove != nil {
 		return h.GroupMemberRemove(payload, data)
+	}
+	return nil
+}
+
+func groupJoinRequestHandler(payload *dto.WSPayload, message []byte) error {
+	data := &dto.WSGroupJoinRequestData{}
+	if err := ParseData(message, data); err != nil {
+		return err
+	}
+	h := getHandlers(payload)
+	if h.GroupJoinRequest != nil {
+		return h.GroupJoinRequest(payload, data)
+	}
+	return nil
+}
+
+func groupMsgReceiveHandler(payload *dto.WSPayload, message []byte) error {
+	data := &dto.WSGroupMsgReceiveData{}
+	if err := ParseData(message, data); err != nil {
+		return err
+	}
+	h := getHandlers(payload)
+	if h.GroupMsgReceive != nil {
+		return h.GroupMsgReceive(payload, data)
+	}
+	return nil
+}
+
+func groupMsgRejectHandler(payload *dto.WSPayload, message []byte) error {
+	data := &dto.WSGroupMsgRejectData{}
+	if err := ParseData(message, data); err != nil {
+		return err
+	}
+	h := getHandlers(payload)
+	if h.GroupMsgReject != nil {
+		return h.GroupMsgReject(payload, data)
+	}
+	return nil
+}
+
+func c2cMsgReceiveHandler(payload *dto.WSPayload, message []byte) error {
+	data := &dto.WSC2CMsgReceiveData{}
+	if err := ParseData(message, data); err != nil {
+		return err
+	}
+	h := getHandlers(payload)
+	if h.C2CMsgReceive != nil {
+		return h.C2CMsgReceive(payload, data)
+	}
+	return nil
+}
+
+func c2cMsgRejectHandler(payload *dto.WSPayload, message []byte) error {
+	data := &dto.WSC2CMsgRejectData{}
+	if err := ParseData(message, data); err != nil {
+		return err
+	}
+	h := getHandlers(payload)
+	if h.C2CMsgReject != nil {
+		return h.C2CMsgReject(payload, data)
 	}
 	return nil
 }

@@ -45,6 +45,12 @@ type Handlers struct {
 	GroupDelRobot     GroupDelRobotEventHandler
 	GroupMemberAdd    GroupMemberAddEventHandler
 	GroupMemberRemove GroupMemberRemoveEventHandler
+	GroupJoinRequest  GroupJoinRequestEventHandler
+
+	GroupMsgReceive GroupMsgReceiveEventHandler
+	GroupMsgReject  GroupMsgRejectEventHandler
+	C2CMsgReceive   C2CMsgReceiveEventHandler
+	C2CMsgReject    C2CMsgRejectEventHandler
 
 	EnterAIO EnterAIOEventHandler
 }
@@ -155,6 +161,21 @@ type GroupMemberAddEventHandler func(event *dto.WSPayload, data *dto.WSGroupMemb
 // GroupMemberRemoveEventHandler 群成员退出事件 handler
 type GroupMemberRemoveEventHandler func(event *dto.WSPayload, data *dto.WSGroupMemberRemoveData) error
 
+// GroupJoinRequestEventHandler 用户申请入群事件 handler
+type GroupJoinRequestEventHandler func(event *dto.WSPayload, data *dto.WSGroupJoinRequestData) error
+
+// GroupMsgReceiveEventHandler 群聊消息接收开启事件 handler
+type GroupMsgReceiveEventHandler func(event *dto.WSPayload, data *dto.WSGroupMsgReceiveData) error
+
+// GroupMsgRejectEventHandler 群聊消息接收关闭事件 handler
+type GroupMsgRejectEventHandler func(event *dto.WSPayload, data *dto.WSGroupMsgRejectData) error
+
+// C2CMsgReceiveEventHandler 单聊消息接收开启事件 handler
+type C2CMsgReceiveEventHandler func(event *dto.WSPayload, data *dto.WSC2CMsgReceiveData) error
+
+// C2CMsgRejectEventHandler 单聊消息接收关闭事件 handler
+type C2CMsgRejectEventHandler func(event *dto.WSPayload, data *dto.WSC2CMsgRejectData) error
+
 // RegisterHandlers 注册事件回调，并返回 intent 用于 websocket 的鉴权
 func RegisterHandlers(handlers ...interface{}) dto.Intent {
 	return registerHandlers(&DefaultHandlers, handlers...)
@@ -184,40 +205,55 @@ func registerHandlers(hStruct *Handlers, handlers ...interface{}) dto.Intent {
 			hStruct.Plain = handle
 		case AudioEventHandler:
 			hStruct.Audio = handle
-			i = i | dto.EventToIntent(
+			i |= dto.EventToIntent(
 				dto.EventAudioStart, dto.EventAudioFinish,
 				dto.EventAudioOnMic, dto.EventAudioOffMic,
 			)
 		case InteractionEventHandler:
 			hStruct.Interaction = handle
-			i = i | dto.EventToIntent(dto.EventInteractionCreate)
+			i |= dto.EventToIntent(dto.EventInteractionCreate)
 		case SubscribeMsgStatusEventHandler:
 			hStruct.SubscribeMsgStatus = handle
-			i = i | dto.EventToIntent(dto.EventSubscribeMsgStatus)
+			i |= dto.EventToIntent(dto.EventSubscribeMsgStatus)
 		case C2CFriendEventHandler:
 			hStruct.C2CFriend = handle
-			i = i | dto.EventToIntent(dto.EventC2CFriendAdd)
+			i |= dto.EventToIntent(dto.EventC2CFriendAdd)
 		case EnterAIOEventHandler:
 			hStruct.EnterAIO = handle
-			i = i | dto.EventToIntent(dto.EventEnterAIO)
+			i |= dto.EventToIntent(dto.EventEnterAIO)
 		case GroupAddRobotEventHandler:
 			hStruct.GroupAddRobot = handle
-			i = i | dto.EventToIntent(dto.EventGroupAddRobot)
+			i |= dto.EventToIntent(dto.EventGroupAddRobot)
 		case GroupDelRobotEventHandler:
 			hStruct.GroupDelRobot = handle
-			i = i | dto.EventToIntent(dto.EventGroupDelRobot)
+			i |= dto.EventToIntent(dto.EventGroupDelRobot)
 		case GroupMemberAddEventHandler:
 			hStruct.GroupMemberAdd = handle
-			i = i | dto.EventToIntent(dto.EventGroupMemberAdd)
+			i |= dto.EventToIntent(dto.EventGroupMemberAdd)
 		case GroupMemberRemoveEventHandler:
 			hStruct.GroupMemberRemove = handle
-			i = i | dto.EventToIntent(dto.EventGroupMemberRemove)
+			i |= dto.EventToIntent(dto.EventGroupMemberRemove)
+		case GroupJoinRequestEventHandler:
+			hStruct.GroupJoinRequest = handle
+			i |= dto.EventToIntent(dto.EventGroupJoinRequest)
+		case GroupMsgReceiveEventHandler:
+			hStruct.GroupMsgReceive = handle
+			i |= dto.EventToIntent(dto.EventGroupMsgReceive)
+		case GroupMsgRejectEventHandler:
+			hStruct.GroupMsgReject = handle
+			i |= dto.EventToIntent(dto.EventGroupMsgReject)
+		case C2CMsgReceiveEventHandler:
+			hStruct.C2CMsgReceive = handle
+			i |= dto.EventToIntent(dto.EventC2CMsgReceive)
+		case C2CMsgRejectEventHandler:
+			hStruct.C2CMsgReject = handle
+			i |= dto.EventToIntent(dto.EventC2CMsgReject)
 		default:
 		}
 	}
-	i = i | registerRelationHandlers(hStruct, i, handlers...)
-	i = i | registerMessageHandlers(hStruct, i, handlers...)
-	i = i | registerForumHandlers(hStruct, i, handlers...)
+	i |= registerRelationHandlers(hStruct, i, handlers...)
+	i |= registerMessageHandlers(hStruct, i, handlers...)
+	i |= registerForumHandlers(hStruct, i, handlers...)
 
 	return i
 }
@@ -227,18 +263,18 @@ func registerForumHandlers(hStruct *Handlers, i dto.Intent, handlers ...interfac
 		switch handle := h.(type) {
 		case ThreadEventHandler:
 			hStruct.Thread = handle
-			i = i | dto.EventToIntent(
+			i |= dto.EventToIntent(
 				dto.EventForumThreadCreate, dto.EventForumThreadUpdate, dto.EventForumThreadDelete,
 			)
 		case PostEventHandler:
 			hStruct.Post = handle
-			i = i | dto.EventToIntent(dto.EventForumPostCreate, dto.EventForumPostDelete)
+			i |= dto.EventToIntent(dto.EventForumPostCreate, dto.EventForumPostDelete)
 		case ReplyEventHandler:
 			hStruct.Reply = handle
-			i = i | dto.EventToIntent(dto.EventForumReplyCreate, dto.EventForumReplyDelete)
+			i |= dto.EventToIntent(dto.EventForumReplyCreate, dto.EventForumReplyDelete)
 		case ForumAuditEventHandler:
 			hStruct.ForumAudit = handle
-			i = i | dto.EventToIntent(dto.EventForumAuditResult)
+			i |= dto.EventToIntent(dto.EventForumAuditResult)
 		default:
 		}
 	}
@@ -251,13 +287,13 @@ func registerRelationHandlers(hStruct *Handlers, i dto.Intent, handlers ...inter
 		switch handle := h.(type) {
 		case GuildEventHandler:
 			hStruct.Guild = handle
-			i = i | dto.EventToIntent(dto.EventGuildCreate, dto.EventGuildDelete, dto.EventGuildUpdate)
+			i |= dto.EventToIntent(dto.EventGuildCreate, dto.EventGuildDelete, dto.EventGuildUpdate)
 		case GuildMemberEventHandler:
 			hStruct.GuildMember = handle
-			i = i | dto.EventToIntent(dto.EventGuildMemberAdd, dto.EventGuildMemberRemove, dto.EventGuildMemberUpdate)
+			i |= dto.EventToIntent(dto.EventGuildMemberAdd, dto.EventGuildMemberRemove, dto.EventGuildMemberUpdate)
 		case ChannelEventHandler:
 			hStruct.Channel = handle
-			i = i | dto.EventToIntent(dto.EventChannelCreate, dto.EventChannelDelete, dto.EventChannelUpdate)
+			i |= dto.EventToIntent(dto.EventChannelCreate, dto.EventChannelDelete, dto.EventChannelUpdate)
 		default:
 		}
 	}
@@ -270,37 +306,37 @@ func registerMessageHandlers(hStruct *Handlers, i dto.Intent, handlers ...interf
 		switch handle := h.(type) {
 		case MessageEventHandler:
 			hStruct.Message = handle
-			i = i | dto.EventToIntent(dto.EventMessageCreate)
+			i |= dto.EventToIntent(dto.EventMessageCreate)
 		case ATMessageEventHandler:
 			hStruct.ATMessage = handle
-			i = i | dto.EventToIntent(dto.EventAtMessageCreate)
+			i |= dto.EventToIntent(dto.EventAtMessageCreate)
 		case DirectMessageEventHandler:
 			hStruct.DirectMessage = handle
-			i = i | dto.EventToIntent(dto.EventDirectMessageCreate)
+			i |= dto.EventToIntent(dto.EventDirectMessageCreate)
 		case MessageDeleteEventHandler:
 			hStruct.MessageDelete = handle
-			i = i | dto.EventToIntent(dto.EventMessageDelete)
+			i |= dto.EventToIntent(dto.EventMessageDelete)
 		case PublicMessageDeleteEventHandler:
 			hStruct.PublicMessageDelete = handle
-			i = i | dto.EventToIntent(dto.EventPublicMessageDelete)
+			i |= dto.EventToIntent(dto.EventPublicMessageDelete)
 		case DirectMessageDeleteEventHandler:
 			hStruct.DirectMessageDelete = handle
-			i = i | dto.EventToIntent(dto.EventDirectMessageDelete)
+			i |= dto.EventToIntent(dto.EventDirectMessageDelete)
 		case MessageReactionEventHandler:
 			hStruct.MessageReaction = handle
-			i = i | dto.EventToIntent(dto.EventMessageReactionAdd, dto.EventMessageReactionRemove)
+			i |= dto.EventToIntent(dto.EventMessageReactionAdd, dto.EventMessageReactionRemove)
 		case MessageAuditEventHandler:
 			hStruct.MessageAudit = handle
-			i = i | dto.EventToIntent(dto.EventMessageAuditPass, dto.EventMessageAuditReject)
+			i |= dto.EventToIntent(dto.EventMessageAuditPass, dto.EventMessageAuditReject)
 		case GroupATMessageEventHandler:
 			hStruct.GroupATMessage = handle
-			i = i | dto.EventToIntent(dto.EventGroupAtMessageCreate)
+			i |= dto.EventToIntent(dto.EventGroupAtMessageCreate)
 		case GroupMessageEventHandler:
 			hStruct.GroupMessage = handle
-			i = i | dto.EventToIntent(dto.EventGroupMessageCreate)
+			i |= dto.EventToIntent(dto.EventGroupMessageCreate)
 		case C2CMessageEventHandler:
 			hStruct.C2CMessage = handle
-			i = i | dto.EventToIntent(dto.EventC2CMessageCreate)
+			i |= dto.EventToIntent(dto.EventC2CMessageCreate)
 		default:
 		}
 	}

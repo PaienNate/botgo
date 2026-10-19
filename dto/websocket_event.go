@@ -48,10 +48,17 @@ const (
 	EventGroupDelRobot         EventType = "GROUP_DEL_ROBOT"
 	EventGroupMemberAdd        EventType = "GROUP_MEMBER_ADD"
 	EventGroupMemberRemove     EventType = "GROUP_MEMBER_REMOVE"
+	EventGroupMsgReceive       EventType = "GROUP_MSG_RECEIVE"
+	EventGroupMsgReject        EventType = "GROUP_MSG_REJECT"
+	EventC2CMsgReceive         EventType = "C2C_MSG_RECEIVE"
+	EventC2CMsgReject          EventType = "C2C_MSG_REJECT"
+	EventGroupJoinRequest      EventType = "GROUP_JOIN_REQUEST"
 	EventEnterAIO              EventType = "ENTER_AIO"
 )
 
 // intentEventMap 不同 intent 对应的事件定义
+//
+//nolint:exhaustive // 部分 intent 没有事件，是官方设计
 var intentEventMap = map[Intent][]EventType{
 	IntentGuilds: {
 		EventGuildCreate, EventGuildUpdate, EventGuildDelete,
@@ -60,8 +67,9 @@ var intentEventMap = map[Intent][]EventType{
 	IntentGuildMembers:  {EventGuildMemberAdd, EventGuildMemberUpdate, EventGuildMemberRemove},
 	IntentGuildMessages: {EventMessageCreate, EventMessageDelete},
 	IntentGroupMessages: {EventGroupAtMessageCreate, EventGroupMessageCreate, EventC2CMessageCreate, EventSubscribeMsgStatus,
-		EventC2CFriendAdd, EventC2CFriendDel, EventGroupAddRobot, EventGroupDelRobot},
-	IntentGroupMembers: {EventGroupMemberAdd, EventGroupMemberRemove},
+		EventC2CFriendAdd, EventC2CFriendDel, EventGroupAddRobot, EventGroupDelRobot,
+		EventGroupMsgReceive, EventGroupMsgReject, EventC2CMsgReceive, EventC2CMsgReject},
+	IntentGroupMembers: {EventGroupMemberAdd, EventGroupMemberRemove, EventGroupJoinRequest},
 
 	IntentGuildMessageReactions: {EventMessageReactionAdd, EventMessageReactionRemove},
 	IntentGuildAtMessage:        {EventAtMessageCreate, EventPublicMessageDelete},
@@ -93,7 +101,7 @@ func transposeIntentEventMap(input map[Intent][]EventType) map[EventType]Intent 
 func EventToIntent(events ...EventType) Intent {
 	var i Intent
 	for _, event := range events {
-		i = i | eventIntentMap[event]
+		i |= eventIntentMap[event]
 	}
 	return i
 }
