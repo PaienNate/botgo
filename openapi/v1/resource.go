@@ -39,6 +39,24 @@ const (
 	groupBotStateURI  uri = "/v2/groups/{group_openid}/bot_state"
 	streamMessagesURI uri = "/v2/users/{user_openid}/stream_messages"
 
+	generateURLLinkURI uri = "/v2/generate_url_link"
+
+	groupBatchRemoveMembersURI  uri = "/v2/groups/{group_openid}/batch_remove_members"
+	groupMemberBlacklistURI     uri = "/v2/groups/{group_openid}/member_blacklist"
+	groupRestrictChatSettingURI uri = "/v2/groups/{group_openid}/restrict_chat_setting"
+	groupJoinRequestListURI     uri = "/v2/groups/{group_openid}/join_request_list"
+	groupApprovalJoinRequestURI uri = "/v2/groups/{group_openid}/approval_join_request/{member_openid}"
+
+	joinApprovalStrategyURI          uri = "/v2/groups/join_approval_strategy"
+	joinApprovalStrategyItemURI      uri = "/v2/groups/join_approval_strategy/{strategy_id}"
+	joinApprovalStrategyExecuteURI   uri = "/v2/groups/join_approval_strategy/{strategy_id}/execute"
+	joinApprovalStrategyWhitelistURI uri = "/v2/groups/join_approval_strategy/{strategy_id}/whitelist_users"
+
+	menuURI        uri = "/v2/menu"
+	panelsURI      uri = "/v2/panels"
+	panelURI       uri = "/v2/panels/{panel_id}"
+	panelTargetURI uri = "/v2/panels/{panel_id}/target"
+
 	messageURI uri = "/channels/{channel_id}/messages/{message_id}"
 
 	userMeURI       uri = "/users/@me"
