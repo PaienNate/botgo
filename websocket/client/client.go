@@ -4,13 +4,20 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
-	wss "github.com/gorilla/websocket" // 是一个流行的 websocket 客户端，服务端实现
+	"github.com/jellydator/ttlcache/v3"
+	"github.com/lxzan/gws"
+	"golang.org/x/net/proxy"
+	"golang.org/x/oauth2"
+
 	"github.com/sealdice/botgo/dto"
 	"github.com/sealdice/botgo/errs"
 	"github.com/sealdice/botgo/event"
@@ -18,8 +25,111 @@ import (
 	"github.com/sealdice/botgo/websocket"
 )
 
-// DefaultQueueSize 监听队列的缓冲长度
-const DefaultQueueSize = 10000
+const (
+	// DefaultQueueSize 监听队列的缓冲长度
+	DefaultQueueSize = 10000
+
+	defaultHandshakeTimeout   = 10 * time.Second
+	defaultReadMaxPayloadSize = 8 << 20 // 8 MiB
+	defaultWriteTimeout       = 10 * time.Second
+	defaultPingInterval       = 30 * time.Second
+	defaultPingWait           = 10 * time.Second
+)
+
+// SeqPolicy 控制 seq 的保存时机。
+type SeqPolicy int
+
+const (
+	// SeqPolicyDefault 使用默认策略（SeqAfterHandle，未开启去重时回退到 SeqBeforeHandle）。
+	SeqPolicyDefault SeqPolicy = iota
+	// SeqBeforeHandle 旧行为：处理前保存 seq，at-most-once，可能丢事件但不会重复执行。
+	SeqBeforeHandle
+	// SeqAfterHandle 新行为：处理成功后保存 seq，配合去重实现 at-least-once。
+	SeqAfterHandle
+)
+
+// ClientOptions websocket 客户端选项。
+type ClientOptions struct {
+	// SeqPolicy 控制 seq 保存时机。默认 SeqAfterHandle。
+	SeqPolicy SeqPolicy
+	// DedupEnabled 是否开启事件去重。默认 true。
+	DedupEnabled bool
+	// DedupTTL 去重缓存 TTL。默认 10 分钟。
+	DedupTTL time.Duration
+	// DedupCapacity 去重缓存最大条目数。默认 100000。
+	DedupCapacity uint64
+}
+
+var (
+	optionsMu            sync.RWMutex
+	defaultClientOptions = ClientOptions{
+		SeqPolicy:     SeqAfterHandle,
+		DedupEnabled:  true,
+		DedupTTL:      10 * time.Minute,
+		DedupCapacity: 100000,
+	}
+)
+
+// SetDefaultOptions 设置新建客户端使用的默认选项。
+// 建议在创建连接之前调用；运行期修改只影响之后创建的客户端。
+func SetDefaultOptions(opts ClientOptions) {
+	if opts.DedupTTL <= 0 {
+		opts.DedupTTL = 10 * time.Minute
+	}
+	if opts.DedupCapacity == 0 {
+		opts.DedupCapacity = 100000
+	}
+	if opts.SeqPolicy == SeqPolicyDefault {
+		opts.SeqPolicy = SeqAfterHandle
+	}
+	if !opts.DedupEnabled {
+		// 没有去重时不能安全地使用 after-handle，否则断线重放可能重复执行。
+		opts.SeqPolicy = SeqBeforeHandle
+	}
+	optionsMu.Lock()
+	defaultClientOptions = opts
+	optionsMu.Unlock()
+}
+
+func currentOptions() ClientOptions {
+	optionsMu.RLock()
+	defer optionsMu.RUnlock()
+	return defaultClientOptions
+}
+
+type messageDeduper struct {
+	cache *ttlcache.Cache[string, struct{}]
+	ttl   time.Duration
+}
+
+func newMessageDeduper(ttl time.Duration, capacity uint64) *messageDeduper {
+	cache := ttlcache.New[string, struct{}](
+		ttlcache.WithTTL[string, struct{}](ttl),
+		ttlcache.WithCapacity[string, struct{}](capacity),
+	)
+	go cache.Start()
+	return &messageDeduper{cache: cache, ttl: ttl}
+}
+
+func (d *messageDeduper) Seen(eventID string) bool {
+	if d == nil || eventID == "" {
+		return false
+	}
+	return d.cache.Has(eventID)
+}
+
+func (d *messageDeduper) Mark(eventID string) {
+	if d == nil || eventID == "" {
+		return
+	}
+	d.cache.Set(eventID, struct{}{}, d.ttl)
+}
+
+func (d *messageDeduper) Stop() {
+	if d != nil && d.cache != nil {
+		d.cache.Stop()
+	}
+}
 
 // Setup 依赖注册
 func Setup() {
@@ -28,25 +138,55 @@ func Setup() {
 
 // New 新建一个连接对象
 func (c *Client) New(ctx context.Context, session dto.Session) websocket.WebSocket {
-	return &Client{
-		messageQueue:    make(messageChan, DefaultQueueSize),
-		session:         &session,
-		closeChan:       make(closeErrorChan, 10),
-		heartBeatTicker: time.NewTicker(60 * time.Second), // 先给一个默认 ticker，在收到 hello 包之后，会 reset
-		ctx:             ctx,
+	opts := currentOptions()
+	seqPolicy := opts.SeqPolicy
+	if seqPolicy == SeqPolicyDefault {
+		seqPolicy = SeqAfterHandle
 	}
+	if !opts.DedupEnabled {
+		seqPolicy = SeqBeforeHandle
+	}
+	client := &Client{
+		messageQueue:        make(messageChan, DefaultQueueSize),
+		session:             &session,
+		closeChan:           make(closeErrorChan, 10),
+		heartBeatTicker:     time.NewTicker(60 * time.Second), // 先给一个默认 ticker，在收到 hello 包之后，会 reset
+		transportPingTicker: time.NewTicker(defaultPingInterval),
+		ctx:                 ctx,
+		queueDone:           make(chan struct{}),
+		writeTimeout:        defaultWriteTimeout,
+		pingInterval:        defaultPingInterval,
+		pingWait:            defaultPingWait,
+		seqPolicy:           seqPolicy,
+	}
+	if opts.DedupEnabled {
+		client.deduper = newMessageDeduper(opts.DedupTTL, opts.DedupCapacity)
+	}
+	client.handler = &gwsEventHandler{client: client}
+	return client
 }
 
 // Client websocket 连接客户端
 type Client struct {
-	version         int
-	conn            *wss.Conn
-	messageQueue    messageChan
-	session         *dto.Session
-	user            *dto.WSUser
-	closeChan       closeErrorChan
-	heartBeatTicker *time.Ticker // 用于维持定时心跳
-	ctx             context.Context
+	version             int
+	conn                *gws.Conn
+	handler             *gwsEventHandler
+	messageQueue        messageChan
+	session             *dto.Session
+	user                *dto.WSUser
+	closeChan           closeErrorChan
+	heartBeatTicker     *time.Ticker // 用于维持 QQ 协议的定时心跳
+	transportPingTicker *time.Ticker // 用于维持 WebSocket 传输层 ping/pong
+	ctx                 context.Context
+	queueDone           chan struct{}
+	queueDoneOnce       sync.Once
+	closeOnce           sync.Once
+	tickerMu            sync.Mutex // 保护 ticker 的 Reset/Stop，OnMessage 与 Listening/Close 可能跨协程
+	writeTimeout        time.Duration
+	pingInterval        time.Duration
+	pingWait            time.Duration
+	seqPolicy           SeqPolicy
+	deduper             *messageDeduper
 }
 
 type messageChan chan *dto.WSPayload
@@ -58,33 +198,44 @@ func (c *Client) Connect() error {
 		return errs.ErrURLInvalid
 	}
 
-	var err error
-	c.conn, _, err = wss.DefaultDialer.Dial(c.session.URL, nil)
+	//nolint:bodyclose // WebSocket 101 响应体由升级后的连接接管
+	conn, _, err := gws.NewClient(c.handler, &gws.ClientOption{
+		Addr:               c.session.URL,
+		HandshakeTimeout:   defaultHandshakeTimeout,
+		ReadMaxPayloadSize: defaultReadMaxPayloadSize,
+		ParallelEnabled:    false,
+		Recovery:           gws.Recovery,
+		Logger:             gwsLogger{},
+		NewDialer: func() (gws.Dialer, error) {
+			return proxy.FromEnvironment(), nil
+		},
+	})
 	if err != nil {
 		log.Errorf("%s, connect err: %v", c.session, err)
 		return err
 	}
+	c.conn = conn
 	log.Infof("%s, url %s, connected", c.session, c.session.URL)
-
 	return nil
 }
 
-// Listening 开始监听，会阻塞进程，内部会从事件队列不断的读取事件，解析后投递到注册的 event handler，如果读取消息过程中发生错误，会循环
-// 定时心跳也在这里维护
+// Listening 开始监听，会阻塞进程，内部会从事件队列不断的读取事件，解析后投递到注册的 event handler。
+// 定时心跳也在这里维护。
 func (c *Client) Listening() error {
 	defer c.Close()
-	// reading message
-	go c.readMessageToQueue()
-	// read message from queue and handle,in goroutine to avoid business logic block closeChan and heartBeatTicker
+
+	go c.conn.ReadLoop()
 	go c.listenMessageAndHandle()
+
+	// transportPingTicker 在 New 中创建，Stop 统一由 Close 持锁执行。
 
 	// 接收 resume signal
 	resumeSignal := make(chan os.Signal, 1)
 	if websocket.ResumeSignal >= syscall.SIGHUP {
 		signal.Notify(resumeSignal, websocket.ResumeSignal)
+		defer signal.Stop(resumeSignal)
 	}
 
-	// handler message
 	for {
 		select {
 		case <-c.ctx.Done():
@@ -93,32 +244,7 @@ func (c *Client) Listening() error {
 			log.Infof("%s, received resumeSignal signal", c.session)
 			return errs.ErrNeedReConnect
 		case err := <-c.closeChan:
-			// 关闭连接的错误码 https://bot.q.qq.com/wiki/develop/api/gateway/error/error.html
-			// 吞掉 4009 的报错
-			if !wss.IsUnexpectedCloseError(err, 4009, 9000) {
-				log.Debugf("%s Listening stop. err is %v", c.session, err)
-			} else {
-				log.Errorf("%s Listening stop. err is %v", c.session, err)
-			}
-
-			// 不能够 identify 的错误
-			if wss.IsCloseError(err, errs.WSCodeBackendBotOffline, errs.WSCodeBackendBotBanned) {
-				err = errs.New(errs.CodeConnCloseCantIdentify, err.Error())
-			}
-			// accessToken过期
-			if wss.IsCloseError(err, errs.WSCodeBackendAuthenticationFail) {
-				_, _ = c.session.TokenSource.Token()
-			}
-			// 这里用 UnexpectedCloseError，如果有需要排除在外的 close error code，可以补充在第二个参数上
-			// 4009: session time out, 发了 reconnect 之后马上关闭连接时候的错误码，这个是允许 resumeSignal 的
-			if wss.IsUnexpectedCloseError(err, errs.WSCodeBackendSessionTimeOut) {
-				err = errs.New(errs.CodeConnCloseCantResume, err.Error())
-			}
-			if event.DefaultHandlers.ErrorNotify != nil {
-				// 通知到使用方错误
-				event.DefaultHandlers.ErrorNotify(err)
-			}
-			return err
+			return c.classifyCloseError(err)
 		case <-c.heartBeatTicker.C:
 			log.Debugf("%s listened heartBeat", c.session)
 			heartBeatEvent := &dto.WSPayload{
@@ -129,6 +255,9 @@ func (c *Client) Listening() error {
 			}
 			// 不处理错误，Write 内部会处理，如果发生发包异常，会通知主协程退出
 			_ = c.Write(heartBeatEvent)
+		case <-c.transportPingTicker.C:
+			// WebSocket 传输层心跳；如果对端不回 pong，deadline 会让 ReadLoop 退出。
+			_ = c.conn.WritePing(nil)
 		}
 	}
 }
@@ -138,9 +267,13 @@ func (c *Client) Write(message *dto.WSPayload) error {
 	m, _ := json.Marshal(message)
 	log.Infof("%s write %s message, %v", c.session, dto.OPMeans(message.OPCode), string(m))
 
-	if err := c.conn.WriteMessage(wss.TextMessage, m); err != nil {
+	if c.conn == nil {
+		return net.ErrClosed
+	}
+	_ = c.conn.SetWriteDeadline(time.Now().Add(c.writeTimeout))
+	if err := c.conn.WriteMessage(gws.OpcodeText, m); err != nil {
 		log.Errorf("%s WriteMessage failed, %v", c.session, err)
-		c.closeChan <- err
+		c.signalClose(err)
 		return err
 	}
 	return nil
@@ -191,10 +324,23 @@ func (c *Client) Identify() error {
 
 // Close 关闭连接
 func (c *Client) Close() {
-	if err := c.conn.Close(); err != nil {
-		log.Errorf("%s, close conn err: %v", c.session, err)
-	}
-	c.heartBeatTicker.Stop()
+	c.closeOnce.Do(func() {
+		c.tickerMu.Lock()
+		if c.transportPingTicker != nil {
+			c.transportPingTicker.Stop()
+		}
+		if c.heartBeatTicker != nil {
+			c.heartBeatTicker.Stop()
+		}
+		c.tickerMu.Unlock()
+		if c.conn != nil {
+			_ = c.conn.SetWriteDeadline(time.Now().Add(time.Second))
+			_ = c.conn.WriteClose(1000, nil)
+			_ = c.conn.NetConn().Close()
+		}
+		c.deduper.Stop()
+		c.signalClose(nil)
+	})
 }
 
 // Session 获取client的session信息
@@ -202,37 +348,67 @@ func (c *Client) Session() *dto.Session {
 	return c.session
 }
 
-func (c *Client) readMessageToQueue() {
-	for {
-		_, message, err := c.conn.ReadMessage()
-		if err != nil {
-			if !wss.IsUnexpectedCloseError(err, 4009, 9000) {
-				log.Debugf("%s read message failed, %v, message %s", c.session, err, string(message))
-			} else {
-				log.Errorf("%s read message failed, %v, message %s", c.session, err, string(message))
-			}
-			close(c.messageQueue)
-			// accessToken过期
-			if wss.IsCloseError(err, errs.WSCodeBackendAuthenticationFail) {
-				_, _ = c.session.TokenSource.Token()
-			}
-			c.closeChan <- err
-			return
-		}
-		payload := &dto.WSPayload{}
-		if err := json.Unmarshal(message, payload); err != nil {
-			log.Errorf("%s json failed, %v", c.session, err)
-			continue
-		}
-		payload.RawMessage = message
-		payload.Session = c.session
-		log.Infof("%s receive %s message, %s", c.session, dto.OPMeans(payload.OPCode), string(message))
-		// 处理内置的一些事件，如果处理成功，则这个事件不再投递给业务
-		if c.isHandleBuildIn(payload) {
-			continue
-		}
-		c.messageQueue <- payload
+func (c *Client) signalClose(err error) {
+	if err == nil {
+		err = errs.ErrNeedReConnect
 	}
+	c.queueDoneOnce.Do(func() {
+		close(c.queueDone)
+	})
+	select {
+	case c.closeChan <- err:
+	default:
+		log.Debugf("%s closeChan is full, drop close error: %v", c.session, err)
+	}
+}
+
+func (c *Client) classifyCloseError(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	// 关闭连接的错误码 https://bot.q.qq.com/wiki/develop/api/gateway/error/error.html
+	if !isUnexpectedCloseError(err, 4009, 9000) {
+		log.Debugf("%s Listening stop. err is %v", c.session, err)
+	} else {
+		log.Errorf("%s Listening stop. err is %v", c.session, err)
+	}
+
+	// 把 close error 规范化，保留官方错误码，交给 sessions/manager 分类。
+	if code, ok := closeCode(err); ok {
+		switch code {
+		case errs.WSCodeBackendBotOffline, errs.WSCodeBackendBotBanned:
+			// 机器人被下架/封禁，不能 identify
+			err = errs.New(errs.CodeConnCloseCantIdentify, err.Error())
+		case errs.WSCodeBackendAuthenticationFail:
+			// accessToken 过期/失效，强制刷新后重试一次
+			forceRefreshToken(c.session.TokenSource)
+			err = errs.New(int(code), err.Error())
+		case errs.WSCodeBackendSessionTimeOut:
+			// 4009: session time out，允许 resume
+			err = errs.New(int(code), err.Error())
+		case errs.WSCodeBackendRateLimit:
+			// 4008: 可以 resume 或 identify，交给上层退避
+			err = errs.New(int(code), err.Error())
+		case errs.WSCodeBackendInvalidIntents, errs.WSCodeBackendDisallowdIntents:
+			// 4013/4014: intent 问题，不能直接重试
+			err = errs.New(int(code), err.Error())
+		case errs.WSCodeBackendUnknownOpCode, errs.WSCodeBackendDecodeError,
+			errs.WSCodeBackendInvalidShard, errs.WSCodeBackendShardingRequired,
+			errs.WSCodeBackendInvalidAPIVersion:
+			// 协议/配置错误，重连也不会成功
+			err = errs.New(int(code), err.Error())
+		default:
+			if isUnexpectedCloseError(err) {
+				err = errs.New(errs.CodeConnCloseCantResume, err.Error())
+			}
+		}
+	}
+
+	if event.DefaultHandlers.ErrorNotify != nil {
+		event.DefaultHandlers.ErrorNotify(err)
+	}
+	return err
 }
 
 func (c *Client) listenMessageAndHandle() {
@@ -241,22 +417,62 @@ func (c *Client) listenMessageAndHandle() {
 		// 打印日志后，关闭这个连接，进入重连流程
 		if err := recover(); err != nil {
 			websocket.PanicHandler(err, c.session)
-			c.closeChan <- fmt.Errorf("panic: %v", err)
+			c.signalClose(fmt.Errorf("panic: %v", err))
 		}
 	}()
-	for payload := range c.messageQueue {
-		c.saveSeq(payload.Seq)
-		// ready 事件需要特殊处理
-		if payload.Type == "READY" {
-			c.readyHandler(payload)
-			continue
-		}
-		// 解析具体事件，并投递给业务注册的 handler
-		if err := event.ParseAndHandle(payload); err != nil {
-			log.Errorf("%s parseAndHandle failed, %v", c.session, err)
+
+	for {
+		select {
+		case payload := <-c.messageQueue:
+			c.handlePayload(payload)
+		case <-c.queueDone:
+			// 排空队列中已经收到的事件，保持与旧实现一致。
+			for {
+				select {
+				case payload := <-c.messageQueue:
+					c.handlePayload(payload)
+				default:
+					log.Infof("%s message queue is closed", c.session)
+					return
+				}
+			}
 		}
 	}
-	log.Infof("%s message queue is closed", c.session)
+}
+
+func (c *Client) handlePayload(payload *dto.WSPayload) {
+	// 去重：已经成功处理过的事件，直接推进 seq，不再投递。
+	if c.deduper.Seen(payload.EventID) {
+		log.Debugf("%s duplicate event %s, skip", c.session, payload.EventID)
+		c.saveSeq(payload.Seq)
+		return
+	}
+
+	if c.seqPolicy == SeqBeforeHandle {
+		c.saveSeq(payload.Seq)
+	}
+
+	// ready 事件需要特殊处理
+	if payload.Type == "READY" {
+		c.readyHandler(payload)
+		if c.seqPolicy == SeqAfterHandle {
+			c.saveSeq(payload.Seq)
+		}
+		return
+	}
+
+	// 解析具体事件，并投递给业务注册的 handler
+	if err := event.ParseAndHandle(payload); err != nil {
+		log.Errorf("%s parseAndHandle failed, %v", c.session, err)
+		// SeqAfterHandle 时不推进 seq，等 resume 重放；
+		// 由于没有 Mark，重放不会被去重跳过。
+		return
+	}
+
+	c.deduper.Mark(payload.EventID)
+	if c.seqPolicy == SeqAfterHandle {
+		c.saveSeq(payload.Seq)
+	}
 }
 
 func (c *Client) saveSeq(seq uint32) {
@@ -273,9 +489,9 @@ func (c *Client) isHandleBuildIn(payload *dto.WSPayload) bool {
 		c.startHeartBeatTicker(payload.RawMessage)
 	case dto.WSHeartbeatAck: // 心跳 ack 不需要业务处理
 	case dto.WSReconnect: // 达到连接时长，需要重新连接，此时可以通过 resume 续传原连接上的事件
-		c.closeChan <- errs.ErrNeedReConnect
+		c.signalClose(errs.ErrNeedReConnect)
 	case dto.WSInvalidSession: // 无效的 sessionLog，需要重新鉴权
-		c.closeChan <- errs.ErrInvalidSession
+		c.signalClose(errs.ErrInvalidSession)
 	default:
 		return false
 	}
@@ -287,9 +503,16 @@ func (c *Client) startHeartBeatTicker(message []byte) {
 	helloData := &dto.WSHelloData{}
 	if err := event.ParseData(message, helloData); err != nil {
 		log.Errorf("%s hello data parse failed, %v, message %v", c.session, err, message)
+		return
+	}
+	if helloData.HeartbeatInterval <= 0 {
+		log.Errorf("%s invalid heartbeat_interval: %d", c.session, helloData.HeartbeatInterval)
+		return
 	}
 	// 根据 hello 的回包，重新设置心跳的定时器时间
+	c.tickerMu.Lock()
 	c.heartBeatTicker.Reset(time.Duration(helloData.HeartbeatInterval) * time.Millisecond)
+	c.tickerMu.Unlock()
 }
 
 // readyHandler 针对ready返回的处理，需要记录 sessionID 等相关信息
@@ -297,12 +520,15 @@ func (c *Client) readyHandler(payload *dto.WSPayload) {
 	readyData := &dto.WSReadyData{}
 	if err := event.ParseData(payload.RawMessage, readyData); err != nil {
 		log.Errorf("%s parseReadyData failed, %v, message %v", c.session, err, payload.RawMessage)
+		return
 	}
 	c.version = readyData.Version
 	// 基于 ready 事件，更新 session 信息
 	c.session.ID = readyData.SessionID
-	c.session.Shards.ShardID = readyData.Shard[0]
-	c.session.Shards.ShardCount = readyData.Shard[1]
+	if len(readyData.Shard) >= 2 {
+		c.session.Shards.ShardID = readyData.Shard[0]
+		c.session.Shards.ShardCount = readyData.Shard[1]
+	}
 	c.user = &dto.WSUser{
 		ID:       readyData.User.ID,
 		Username: readyData.User.Username,
@@ -312,4 +538,95 @@ func (c *Client) readyHandler(payload *dto.WSPayload) {
 	if event.DefaultHandlers.Ready != nil {
 		event.DefaultHandlers.Ready(payload, readyData)
 	}
+}
+
+type gwsEventHandler struct {
+	client *Client
+}
+
+func (h *gwsEventHandler) OnOpen(socket *gws.Conn) {
+	c := h.client
+	_ = socket.SetDeadline(time.Now().Add(c.pingInterval + c.pingWait))
+}
+
+func (h *gwsEventHandler) OnClose(_ *gws.Conn, err error) {
+	h.client.signalClose(err)
+}
+
+func (h *gwsEventHandler) OnPing(socket *gws.Conn, payload []byte) {
+	_ = socket.WritePong(payload)
+	_ = socket.SetDeadline(time.Now().Add(h.client.pingInterval + h.client.pingWait))
+}
+
+func (h *gwsEventHandler) OnPong(socket *gws.Conn, _ []byte) {
+	_ = socket.SetDeadline(time.Now().Add(h.client.pingInterval + h.client.pingWait))
+}
+
+func (h *gwsEventHandler) OnMessage(_ *gws.Conn, message *gws.Message) {
+	defer func() { _ = message.Close() }()
+
+	if message.Opcode != gws.OpcodeText {
+		return
+	}
+
+	c := h.client
+	raw := message.Bytes()
+	payload := &dto.WSPayload{}
+	if err := json.Unmarshal(raw, payload); err != nil {
+		log.Errorf("%s json failed, %v", c.session, err)
+		return
+	}
+	payload.RawMessage = append([]byte(nil), raw...)
+	payload.Session = c.session
+	log.Infof("%s receive %s message, %s", c.session, dto.OPMeans(payload.OPCode), string(raw))
+
+	// 处理内置的一些事件，如果处理成功，则这个事件不再投递给业务
+	if c.isHandleBuildIn(payload) {
+		return
+	}
+
+	select {
+	case c.messageQueue <- payload:
+	case <-c.queueDone:
+	}
+}
+
+type gwsLogger struct{}
+
+func (gwsLogger) Error(v ...any) {
+	log.Error(v...)
+}
+
+func closeCode(err error) (uint16, bool) {
+	var closeErr *gws.CloseError
+	if errors.As(err, &closeErr) {
+		return closeErr.Code, true
+	}
+	return 0, false
+}
+
+func isUnexpectedCloseError(err error, allowed ...int) bool {
+	code, ok := closeCode(err)
+	if !ok {
+		return false
+	}
+	if code == 1000 || code == 1001 {
+		return false
+	}
+	for _, c := range allowed {
+		if int(code) == c {
+			return false
+		}
+	}
+	return true
+}
+
+func forceRefreshToken(tokenSource oauth2.TokenSource) {
+	if refreshable, ok := tokenSource.(interface {
+		ForceRefresh() (*oauth2.Token, error)
+	}); ok {
+		_, _ = refreshable.ForceRefresh()
+		return
+	}
+	_, _ = tokenSource.Token()
 }
