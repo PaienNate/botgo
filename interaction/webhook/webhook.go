@@ -3,13 +3,10 @@ package webhook
 
 import (
 	"encoding/json"
-	"io"
 	"net/http"
 	"os"
 
-	"github.com/sealdice/botgo/constant"
 	"github.com/sealdice/botgo/dto"
-	"github.com/sealdice/botgo/event"
 	"github.com/sealdice/botgo/interaction/signature"
 	"github.com/sealdice/botgo/log"
 	"github.com/sealdice/botgo/token"
@@ -42,86 +39,17 @@ var DefaultGetSecretFunc = func() string {
 	return os.Getenv("QQBotSecret")
 }
 
-// HTTPHandler 用户处理回调时间，该函数实现的是 https://pkg.go.dev/net/http#HandleFunc
+// HTTPHandler 用户处理回调事件，该函数实现的是 https://pkg.go.dev/net/http#HandleFunc
+//
+// 保持旧签名不变。内部使用默认配置：
+//   - 同步 ACK
+//   - 不去重
+//
+// 如果需要去重、异步 ACK、请求大小限制等能力，请使用 NewHandler 或 webhook.Server。
 func HTTPHandler(w http.ResponseWriter, r *http.Request, credentials *token.QQBotCredentials) {
-	defer r.Body.Close()
-	body := make([]byte, r.ContentLength)
-	if _, err := r.Body.Read(body); err != nil && err != io.EOF {
-		log.Errorf("read http callback body error: %s", err)
-		return
-	}
-	log.Debugf("http callback body: %s,len:%d", string(body), len(body))
-	log.Debugf("http callback header: %v", r.Header)
-	traceID := r.Header.Get(constant.HeaderTraceID)
-	// 签名验证
-	if pass, err := signature.Verify(credentials.AppSecret, r.Header, body); err != nil || !pass {
-		log.Errorf("signature verify failed, err: %v, traceID: %s", err, traceID)
-		return
-	}
-	// 解析 payload
-	payload := &dto.WSPayload{}
-	if err := json.Unmarshal(body, payload); err != nil {
-		log.Errorf("unmarshal http callback body error: %s, traceID: %s", err, traceID)
-		return
-	}
-	log.Info("payload:%+v", payload)
-	// 原始数据放入，parse 的时候需要从里面提取
-	payload.RawMessage = body
-	payload.Session = &dto.Session{AppID: credentials.AppID}
-	var result string
-	if payload.OPCode == dto.HTTPCallbackValidation {
-		data, ok := payload.Data.(map[string]interface{})
-		if !ok {
-			log.Errorf("callback data invalid: %+v, traceID: %s", payload.Data, traceID)
-			return
-		}
-		plainToken, ptOk := data["plain_token"].(string)
-		eventTs, etOk := data["event_ts"].(string)
-		if !ptOk || !etOk {
-			log.Errorf("callback data invalid: %+v, traceID: %s", payload.Data, traceID)
-		}
-		req := &dto.WHValidationReq{
-			PlainToken: plainToken,
-			EventTs:    eventTs,
-		}
-		validationRsp := GenValidationACK(req, r.Header, credentials.AppSecret)
-		if validationRsp != nil {
-			if _, err := w.Write(validationRsp); err != nil {
-				log.Errorf("write http callback response error: %s, traceID: %s", err, traceID)
-				return
-			}
-		}
-		return
-	}
-
-	result = parsePayload(payload, traceID)
-	if result != "" {
-		if _, err := w.Write([]byte(result)); err != nil {
-			log.Errorf("write http callback response error: %s, traceID: %s", err, traceID)
-			return
-		}
-	}
-}
-
-func parsePayload(payload *dto.WSPayload, traceID string) string {
-	// 处理心跳包
-	if payload.OPCode == dto.WSHeartbeat {
-		return GenHeartbeatACK(uint32(payload.Data.(float64)))
-	}
-	// 处理事件
-	if payload.OPCode == dto.WSDispatchEvent {
-		// 解析具体事件，并投递给业务注册的handler
-		if err := event.ParseAndHandle(payload); err != nil {
-			log.Errorf(
-				"parseAndHandle failed, %v, traceID:%s, payload: %v", err,
-				traceID, payload,
-			)
-			return GenDispatchACK(false)
-		}
-		return GenDispatchACK(true)
-	}
-
-	return ""
+	NewHandler(HandlerOptions{
+		Credentials: credentials,
+	}).ServeHTTP(w, r)
 }
 
 // GenValidationACK 生成回调校验回包
