@@ -1114,3 +1114,36 @@ BB 的帧长这样：
   - `go test -short ./...` → 全绿
   - `go test -race -short <核心包>` → 全绿
   - SealDice `go build ./...` + `go test ./dice -run OfficialQQ` → 通过
+
+---
+
+## 12. QQ 官方 changelog 对齐（2026-08 ~ 2026-09）
+
+### 20260916
+
+- `/v2/generate_url_link`：新增 `ShareAPI.GenerateURLLink`，请求 `callback_data`，响应按新文档使用 `data.url`。
+- `ark_type`：新增 `dto.ARKData` 与 `ArkTypePicture = "picture"`，并补齐 tuwen/feed/miniapp/map/contact_card/video_share/music_together 常量。
+
+### 20260903
+
+- `GroupAPI.GetGroupMembers`：GET + cursor/next_cursor。
+- `GroupAPI.GetGroupMember`：GET 单个成员。
+- `GroupManageAPI.BatchRemoveMembers`：POST 批量移除。
+- `GroupManageAPI.GetGroupBlacklist`：GET 黑名单查询。
+- `GroupManageAPI.UpdateGroupBlacklist`：POST add/del 黑名单。
+
+### 20260812
+
+- `MenuAPI.GetMenu` / `PutMenu`：GET/PUT `/v2/menu`。
+- `PanelAPI`：List/Create/Get/Update/Delete/UpdateTarget，覆盖 `/v2/panels` 与 `/v2/panels/{panel_id}`。
+
+### 20260810
+
+- 域名统一：`constant.APIDomain` 与 `TokenDomain` 均为 `https://api.bot.qq.com`；sandbox 保持官方 `https://sandbox.api.sgroup.qq.com`。
+- Markdown：`dto.Markdown.ForceVerifyImageResource`。
+- 群禁言：`GroupManageAPI.GetGroupMuteSetting` / `SetGroupMute`。
+- 入群申请：`JoinRequestAPI.ListJoinRequests` / `ApproveJoinRequest`。
+- 入群自动审批策略：`JoinApprovalStrategyAPI` 的列表/创建/修改/删除/执行/白名单六个方法。
+- 用户入群申请事件：`EventGroupJoinRequest` + `WSGroupJoinRequestData` + handler + intent。
+
+新接口全部以**可选接口**提供，不修改现有 `OpenAPI`，避免破坏第三方实现者。
