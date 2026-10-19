@@ -1,0 +1,99 @@
+# tencent-connect/botgo fork 调研（2026-10）
+
+## 范围与方法
+
+- 数据源：GitHub forks API（通过代理访问），共 73 个 fork。
+- 时间窗口：2026-08-20 ~ 2026-10-20（两个月）。
+- 筛选条件：`pushed_at` 或 `updated_at` 在窗口内。
+- 检查方式：下载默认分支源码，与 `tencent-connect/botgo` master 做 tree diff；重点看核心 SDK 代码，不看业务示例。
+- 兼容性原则：**不破坏 SealDice 现有调用面；新能力优先做成可选包/可选接口。**
+
+## 窗口内的 fork
+
+| fork | pushed_at | 默认分支状态 | 结论 |
+|---|---|---|---|
+| afjcjsbx/botgo | 2026-10-15 | 与上游一致 | 无可汲取代码 |
+| diablobear2026/botgo | 2026-10-12 | 只改 examples（ASR/TTS/COS/FAQ/silk/voice_reply） | 业务特化，不收 |
+| SpellingDragon/botgo | 2026-10-09 | 与上游一致 | 无可汲取代码 |
+| SHAWNHU0621/botgo | 2026-10-07 | 只改 `openapi/v1/openapi.go` | **已采纳：请求级 auth 修复** |
+| HDU-Channal/botgo | 2026-09-29 | 只改 `openapi/v1/openapi.go` | **已采纳：同一修复** |
+| WindowsSov8forUs/botgo-plus | 2026-09-26 | 大量改造 | 见下文，按候选清单处理 |
+| cyqmq/botgo | 2026-09-18 | 与上游一致 | 无可汲取代码 |
+| sealdice/botgo | 2026-09-16 | 我们的基线 | — |
+| crazysarah/botgo | 2026-09-04 | 与上游一致 | 无可汲取代码 |
+| wowzydld/botgo | 2024-12-27 pushed，2026-09-20 updated | 仅元数据更新 | 跳过 |
+| usamikinoko/botgo | 2024-12-27 pushed，2026-09-02 updated | 仅元数据更新 | 跳过 |
+
+> 说明：部分 fork 的 `updated_at` 很新但 `pushed_at` 是旧日期，通常只是 star/描述/分支元数据变化，没有代码更新。
+
+## 已采纳
+
+### 1. OnBeforeRequest 请求级 auth（SHAWNHU0621 / HDU-Channal）
+
+上游 v0.2.1 的 `OnBeforeRequest` 同时修改了 `resty.Client`：
+
+```go
+c.SetAuthScheme(tk.TokenType)
+c.SetAuthToken(tk.AccessToken)
+```
+
+这是 client 级可变状态，并发请求会互相覆盖，存在 data race。两个 fork 都改成只设置 request：
+
+```go
+r.SetAuthScheme(tk.TokenType)
+r.SetAuthToken(tk.AccessToken)
+```
+
+我们已采纳，保留 request 级设置，删除 client 级设置。
+
+### 2. Go 图片格式转换（botgo-plus 思路）
+
+新增 `pkg/image`：
+
+- 纯 Go，不依赖 ffmpeg
+- 已是 png/jpg/gif 直接透传
+- BMP 转 JPEG，其他支持格式转 PNG
+- 内存内转换，不写 `data/cache`
+- 限制 50MiB / 单边 10000px，防解压炸弹
+
+这是 botgo-plus `pkg/image` 思路的重写版本，只保留 QQ 官方图片格式所需能力。
+
+### 3. `dto.Message.Ret`
+
+botgo-plus 的 `Message` 有：
+
+```go
+Ret int `json:"ret,omitempty"` // 超过主动限制返回 22009
+```
+
+已以增量字段方式加入，不影响现有 JSON。
+
+### 4. 日志脱敏（review botgo-plus token 时发现）
+
+修复了我们自己继承的日志泄密：
+
+- token 请求不再打印 `clientSecret`
+- token 响应不再打印 `access_token`
+- WS Identify/Resume 不再打印完整 payload
+
+## 候选清单（待一起确认）
+
+| 优先级 | 候选 | 来源 | 价值 | 成本 | 备注 |
+|---|---|---|---|---|---|
+| P1 | `PostMessageMultipart` / `PostDirectMessageMultipart` | botgo-plus | 频道图片 multipart 发送，避开 base64 限制 | 低 | 建议放进可选 `FormFileAPI`，不动 `OpenAPI` |
+| P2 | 论坛发帖 `PostForum` | botgo-plus `PostFourm` | 补论坛创建帖子能力 | 低 | 先核对当前官方 `/channels/{channel_id}/threads` 文档 |
+| P2 | 去重 EventID 为空时使用 payload hash fallback | botgo-plus | 极少数无 EventID 事件的去重 | 低 | 用 xxhash/TTL cache，不照搬它的 sync.Map 全量存 payload |
+| P3 | `pkg/mp4` 转码 | botgo-plus | 非 mp4 视频转码 | 中高 | 依赖 ffmpeg；需 context、超时、大小限制 |
+| P3 | 音频适配 | botgo-plus / 官方新文档 | 新版本已支持 mp3/wav | 中 | **优先直接支持 mp3/wav，不再为旧版强上 silk** |
+| — | `openapi/v2` 双实现 | botgo-plus | 无 | 高 | 域名仍是旧 `api.sgroup.qq.com`，拒绝 |
+| — | Gin Webhook Server | botgo-plus | 无 | 高 | 校验顺序/op 12 ACK/去重/多账号都不如现有实现 |
+| — | `token.BotToken/InitToken` | botgo-plus | 无 | 中 | 无 60s 提前量/退避/ForceRefresh，且日志泄密 |
+| — | `sessions/multi` | botgo-plus | 无 | 中 | 仍是旧 panic/无退避模型 |
+| — | 业务示例（ASR/TTS/COS/FAQ） | diablobear2026 | 业务特化 | — | 不属于 SDK 能力 |
+
+## 兼容性红线
+
+- 不改 `websocket.WebSocket`、`event.RegisterHandlers*`、`interaction/webhook.HTTPHandler`、`token.StartRefreshAccessToken` 签名。
+- 新 API 一律作为可选接口，不塞进 `openapi.OpenAPI`。
+- 新包不进入默认依赖链；ffmpeg/大体积 codec 必须可选。
+- SealDice 现有官方 QQ 适配器用到的符号必须保持可用。

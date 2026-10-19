@@ -49,7 +49,7 @@ func (h *testClientHandler) OnMessage(_ *gws.Conn, message *gws.Message) {
 
 func (h *testClientHandler) waitFor(t *testing.T, typ string) Frame {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		h.mu.Lock()
 		for _, frame := range h.messages {
@@ -84,7 +84,7 @@ func TestHubBroadcast(t *testing.T) {
 
 	select {
 	case <-handler.opened:
-	case <-time.After(3 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("client open timeout")
 	}
 

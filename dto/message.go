@@ -49,6 +49,8 @@ type Message struct {
 	TTL uint `json:"ttl,omitempty"`
 	// 消息场景描述
 	MessageScene MessageScene `json:"message_scene,omitempty"`
+	// Ret 发送结果返回码；例如超过主动消息限制会返回 22009。
+	Ret int `json:"ret,omitempty"`
 }
 
 // Embed 结构

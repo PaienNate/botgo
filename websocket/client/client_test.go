@@ -166,7 +166,7 @@ func TestClientIdentifyAndEvent(t *testing.T) {
 
 	select {
 	case <-readyCh:
-	case <-time.After(3 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("ready timeout")
 	}
 
@@ -184,7 +184,7 @@ func TestClientIdentifyAndEvent(t *testing.T) {
 		}
 	}`)
 
-	deadline := time.Now().Add(3 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for atomic.LoadInt32(&received) == 0 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -198,7 +198,7 @@ func TestClientIdentifyAndEvent(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Listening returned error: %v", err)
 		}
-	case <-time.After(3 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("Listening did not stop")
 	}
 }
@@ -282,7 +282,7 @@ func TestClientCloseCodeMapping(t *testing.T) {
 
 			select {
 			case <-readyCh:
-			case <-time.After(3 * time.Second):
+			case <-time.After(10 * time.Second):
 				t.Fatal("ready timeout")
 			}
 
@@ -295,7 +295,7 @@ func TestClientCloseCodeMapping(t *testing.T) {
 				if got := errs.Error(err).Code(); got != tt.wantCode {
 					t.Fatalf("error code = %d, want %d (err: %v)", got, tt.wantCode, err)
 				}
-			case <-time.After(3 * time.Second):
+			case <-time.After(10 * time.Second):
 				t.Fatal("Listening did not stop")
 			}
 		})

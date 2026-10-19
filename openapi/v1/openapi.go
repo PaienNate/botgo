@@ -107,10 +107,9 @@ func (o *openAPI) setupClient(appID string) {
 					log.Errorf("[setupClient] retrieve token failed:%s", err)
 					return err
 				}
+				// 只设置到 request 上，不能修改 client：并发请求会互相覆盖，存在 data race。
 				r.SetAuthScheme(tk.TokenType)
 				r.SetAuthToken(tk.AccessToken)
-				c.SetAuthScheme(tk.TokenType)
-				c.SetAuthToken(tk.AccessToken)
 
 				if r.Header == nil {
 					r.Header = make(http.Header)
