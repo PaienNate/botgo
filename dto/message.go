@@ -33,6 +33,8 @@ type Message struct {
 	Mentions []*User `json:"mentions"`
 	// ark 消息
 	Ark *Ark `json:"ark"`
+	// ark 结构化数据（事件）
+	ARKData *ARKData `json:"ark_data,omitempty"`
 	// 私信消息
 	DirectMessage bool `json:"direct_message"`
 	// 子频道 seq，用于消息间的排序，seq 在同一子频道中按从先到后的顺序递增，不同的子频道之前消息无法排序

@@ -130,6 +130,8 @@ type Markdown struct {
 	Content          string            `json:"content"`            // 原生 markdown
 	Style            *MarkdownStyle    `json:"style"`              // markdown样式
 	ProcessMsg       string            `json:"process_msg"`        // markdown引导消息
+	// ForceVerifyImageResource 是否校验图片转存结果；true 时图片转存失败会返回错误且消息不发送。
+	ForceVerifyImageResource bool `json:"force_verify_image_resource,omitempty"`
 }
 
 // MarkdownStyle markdown 样式
