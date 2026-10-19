@@ -182,7 +182,7 @@ func (w *QQBotTokenSource) getNewToken() (*oauth2.Token, error) {
 		return nil, err
 	}
 	payload := bytes.NewReader(data)
-	log.Debugf("retrieve access token URL:%v req:%v", getTokenURL(), string(data))
+	log.Debugf("retrieve access token URL:%v", getTokenURL())
 
 	ctx, cancel := context.WithTimeout(context.Background(), tokenRequestTimeout)
 	defer cancel()
@@ -210,10 +210,10 @@ func (w *QQBotTokenSource) getNewToken() (*oauth2.Token, error) {
 		return nil, err
 	}
 	if rsp.StatusCode != http.StatusOK {
-		log.Errorf("retrieve token http status:%d body:%s traceID:%s", rsp.StatusCode, string(body), rspTraceID)
+		log.Errorf("retrieve token http status:%d traceID:%s", rsp.StatusCode, rspTraceID)
 		return nil, fmt.Errorf("retrieve token http status %d, traceID %s", rsp.StatusCode, rspTraceID)
 	}
-	log.Debugf("access token:%v traceID:%v", string(body), rspTraceID)
+	log.Debugf("access token response received, size=%d traceID=%s", len(body), rspTraceID)
 	retrieveRsp := &qqBotTokenRsp{}
 	if err = json.Unmarshal(body, retrieveRsp); err != nil {
 		log.Errorf("unmarshal rsp failed:%v traceID:%v", err, rspTraceID)

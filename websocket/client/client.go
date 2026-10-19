@@ -265,7 +265,12 @@ func (c *Client) Listening() error {
 // Write 往 ws 写入数据
 func (c *Client) Write(message *dto.WSPayload) error {
 	m, _ := json.Marshal(message)
-	log.Infof("%s write %s message, %v", c.session, dto.OPMeans(message.OPCode), string(m))
+	if message.OPCode == dto.WSIdentity || message.OPCode == dto.WSResume {
+		// Identify/Resume 的 payload 内含 access_token，不能原文写日志。
+		log.Infof("%s write %s message (token redacted)", c.session, dto.OPMeans(message.OPCode))
+	} else {
+		log.Infof("%s write %s message, %v", c.session, dto.OPMeans(message.OPCode), string(m))
+	}
 
 	if c.conn == nil {
 		return net.ErrClosed
