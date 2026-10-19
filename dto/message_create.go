@@ -53,7 +53,7 @@ const (
 // MessageToCreate 发送消息结构体定义
 type MessageToCreate struct {
 	Content          string                    `json:"content,omitempty"`
-	MsgType          MessageType               `json:"msg_type,omitempty"` //消息类型: 0:文字消息, 2: md消息
+	MsgType          MessageType               `json:"msg_type,omitempty"` // 消息类型: 0:文字消息, 2: md消息
 	Embed            *Embed                    `json:"embed,omitempty"`
 	Ark              *Ark                      `json:"ark,omitempty"`
 	Image            string                    `json:"image,omitempty"`
@@ -62,7 +62,7 @@ type MessageToCreate struct {
 	Markdown         *Markdown                 `json:"markdown,omitempty"`
 	Keyboard         *keyboard.MessageKeyboard `json:"keyboard,omitempty"`        // 消息按钮组件
 	EventID          string                    `json:"event_id,omitempty"`        // 要回复的事件id, 逻辑同MsgID
-	Timestamp        int64                     `json:"timestamp,omitempty"`       //TODO delete this
+	Timestamp        int64                     `json:"timestamp,omitempty"`       // TODO delete this
 	MsgSeq           uint32                    `json:"msg_seq,omitempty"`         // 机器人对于回复一个msg_id或者event_id的消息序号，指定后根据这个字段和msg_id或者event_id进行去重
 	SubscribeID      string                    `json:"subscribe_id,omitempty"`    // 订阅id，发送订阅消息时使用
 	InputNotify      *InputNotify              `json:"input_notify,omitempty"`    // 输入状态状态信息

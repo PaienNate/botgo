@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"strconv"
 	"time"
@@ -70,7 +69,7 @@ func SimulateSearch(config *Config, keyword string) (*dto.SearchRsp, error) {
 	}()
 
 	// parse resp body
-	body, err := ioutil.ReadAll(io.LimitReader(resp.Body, maxRespBuffer))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxRespBuffer))
 	if err != nil {
 		return nil, err
 	}

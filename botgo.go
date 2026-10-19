@@ -2,12 +2,13 @@
 package botgo
 
 import (
+	"golang.org/x/oauth2"
+
 	"github.com/sealdice/botgo/errs"
 	"github.com/sealdice/botgo/log"
 	"github.com/sealdice/botgo/openapi"
 	v1 "github.com/sealdice/botgo/openapi/v1"
 	"github.com/sealdice/botgo/websocket/client"
-	"golang.org/x/oauth2"
 )
 
 func init() {
@@ -26,7 +27,7 @@ func SelectOpenAPIVersion(version openapi.APIVersion) error {
 		log.Errorf("version %v openapi not found or setup", version)
 		return errs.ErrNotFoundOpenAPI
 	}
-	openapi.DefaultImpl = openapi.VersionMapping[version]
+	openapi.DefaultImpl = openapi.VersionMapping[version] //nolint:reassign // 全局注册点
 	return nil
 }
 

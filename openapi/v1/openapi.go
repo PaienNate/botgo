@@ -10,12 +10,13 @@ import (
 	"time"
 
 	"github.com/go-resty/resty/v2" // resty 是一个优秀的 rest api 客户端，可以极大的减少开发基于 rest 标准接口求请求 of 封装工作量
+	"golang.org/x/oauth2"
+
 	"github.com/sealdice/botgo/constant"
 	"github.com/sealdice/botgo/errs"
 	"github.com/sealdice/botgo/log"
 	"github.com/sealdice/botgo/openapi"
 	"github.com/sealdice/botgo/version"
-	"golang.org/x/oauth2"
 )
 
 // MaxIdleConns 默认指定空闲连接池大小

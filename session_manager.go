@@ -3,9 +3,10 @@ package botgo
 import (
 	"context"
 
+	"golang.org/x/oauth2"
+
 	"github.com/sealdice/botgo/dto"
 	"github.com/sealdice/botgo/sessions/local"
-	"golang.org/x/oauth2"
 )
 
 // defaultSessionManager 默认实现的 session manager 为单机版本

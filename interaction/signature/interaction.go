@@ -93,7 +93,7 @@ func decodeSigBuffer(signature string) ([]byte, error) {
 	}
 	sigBuf, err := hex.DecodeString(signature)
 	if err != nil {
-		return nil, fmt.Errorf("hex decode signature failed: %v", err)
+		return nil, fmt.Errorf("hex decode signature failed: %w", err)
 	}
 	if len(sigBuf) != ed25519.SignatureSize || sigBuf[63]&224 != 0 {
 		return nil, errors.New("signature decode result is not a valid buf")

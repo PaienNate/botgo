@@ -10,5 +10,5 @@ type WHValidationReq struct {
 type WHValidationRsp struct {
 	PlainToken  string `json:"plain_token"`
 	Signature   string `json:"signature"`
-	DataVersion string `json:"data_version"` //数据格式版本号
+	DataVersion string `json:"data_version"` // 数据格式版本号
 }

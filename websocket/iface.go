@@ -2,6 +2,7 @@ package websocket
 
 import (
 	"context"
+
 	"github.com/sealdice/botgo/dto"
 )
 

@@ -9,8 +9,8 @@ import (
 func Test_transposeIntentEventMap(t *testing.T) {
 	t.Run("transpose", func(t *testing.T) {
 		re := transposeIntentEventMap(intentEventMap)
-		assert.Equal(t, re[EventAudioFinish], IntentAudio)
-		assert.Equal(t, re[EventAudioOffMic], IntentAudio)
-		assert.Equal(t, re[EventChannelCreate], IntentGuilds)
+		assert.Equal(t, IntentAudio, re[EventAudioFinish])
+		assert.Equal(t, IntentAudio, re[EventAudioOffMic])
+		assert.Equal(t, IntentGuilds, re[EventChannelCreate])
 	})
 }

@@ -22,6 +22,8 @@ const (
 )
 
 // opMeans op 对应的含义字符串标识
+//
+//nolint:exhaustive // 非 dispatch opcode 在别处处理
 var opMeans = map[OPCode]string{
 	WSDispatchEvent:  "Event",
 	WSHeartbeat:      "Heartbeat",

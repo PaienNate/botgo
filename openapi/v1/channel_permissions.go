@@ -40,12 +40,12 @@ func (o *openAPI) PutChannelPermissions(ctx context.Context, channelID, userID s
 	p *dto.UpdateChannelPermissions) error {
 	if p.Add != "" {
 		if _, err := strconv.ParseUint(p.Add, 10, 64); err != nil {
-			return fmt.Errorf("invalid parameter add: %v", err)
+			return fmt.Errorf("invalid parameter add: %w", err)
 		}
 	}
 	if p.Remove != "" {
 		if _, err := strconv.ParseUint(p.Remove, 10, 64); err != nil {
-			return fmt.Errorf("invalid parameter remove: %v", err)
+			return fmt.Errorf("invalid parameter remove: %w", err)
 		}
 	}
 	_, err := o.request(ctx).
@@ -61,12 +61,12 @@ func (o *openAPI) PutChannelRolesPermissions(ctx context.Context, channelID, rol
 	p *dto.UpdateChannelPermissions) error {
 	if p.Add != "" {
 		if _, err := strconv.ParseUint(p.Add, 10, 64); err != nil {
-			return fmt.Errorf("invalid parameter add: %v", err)
+			return fmt.Errorf("invalid parameter add: %w", err)
 		}
 	}
 	if p.Remove != "" {
 		if _, err := strconv.ParseUint(p.Remove, 10, 64); err != nil {
-			return fmt.Errorf("invalid parameter remove: %v", err)
+			return fmt.Errorf("invalid parameter remove: %w", err)
 		}
 	}
 	_, err := o.request(ctx).

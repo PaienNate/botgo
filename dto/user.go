@@ -9,6 +9,6 @@ type User struct {
 	UnionOpenID      string `json:"union_openid"`       // 特殊关联应用的 openid
 	UnionUserAccount string `json:"union_user_account"` // 机器人关联的用户信息，与union_openid关联的应用是同一个
 	MemberOpenID     string `json:"member_openid"`
-	UserOpenID       string `json:"user_openid"`        // 用户OpenID（C2C场景）
-	MemberRole       string `json:"member_role"`        // 群成员角色 owner群主 admin管理员 member普通成员
+	UserOpenID       string `json:"user_openid"` // 用户OpenID（C2C场景）
+	MemberRole       string `json:"member_role"` // 群成员角色 owner群主 admin管理员 member普通成员
 }

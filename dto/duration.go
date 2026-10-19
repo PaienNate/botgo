@@ -15,7 +15,7 @@ func (d *Duration) UnmarshalJSON(bytes []byte) error {
 	var s = strings.Trim(string(bytes), "\"'")
 	t, err := time.ParseDuration(s)
 	if err != nil {
-		return fmt.Errorf("failed to parse '%s' to time.Duration: %v", s, err)
+		return fmt.Errorf("failed to parse '%s' to time.Duration: %w", s, err)
 	}
 
 	*d = Duration(t)

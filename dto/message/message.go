@@ -20,8 +20,8 @@ type CMD struct {
 }
 
 // ETLInput 清理输出
-//  - 去掉@结构
-//  - trim
+//   - 去掉@结构
+//   - trim
 func ETLInput(input string) string {
 	etlData := string(atRE.ReplaceAll([]byte(input), []byte("")))
 	etlData = strings.Trim(etlData, spaceCharSet)
