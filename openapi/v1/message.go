@@ -1,6 +1,7 @@
 package v1
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -254,6 +255,60 @@ func (o *openAPI) PostStreamMessage(
 		return nil, err
 	}
 	return resp.Result().(*dto.StreamMessageResp), nil
+}
+
+// PostMessageMultipart 发送频道消息（multipart/form-data，可带 file_image）。
+// 官方文档：/channels/{channel_id}/messages 支持 application/json 与 multipart/form-data。
+func (o *openAPI) PostMessageMultipart(
+	ctx context.Context, channelID string, msg *dto.MessageToCreate, fileImageData []byte,
+	opt ...options.Option,
+) (*dto.Message, error) {
+	if msg == nil {
+		msg = &dto.MessageToCreate{}
+	}
+	form := map[string]string{}
+	if msg.Content != "" {
+		form["content"] = msg.Content
+	}
+	if msg.Embed != nil {
+		form["embed"] = toJSON(msg.Embed)
+	}
+	if msg.Ark != nil {
+		form["ark"] = toJSON(msg.Ark)
+	}
+	if msg.Image != "" && len(fileImageData) == 0 {
+		form["image"] = msg.Image
+	}
+	if msg.MsgID != "" {
+		form["msg_id"] = msg.MsgID
+	}
+	if msg.EventID != "" {
+		form["event_id"] = msg.EventID
+	}
+	if msg.MessageReference != nil {
+		form["message_reference"] = toJSON(msg.MessageReference)
+	}
+	if msg.Markdown != nil {
+		form["markdown"] = toJSON(msg.Markdown)
+	}
+
+	req := o.request(ctx).
+		SetResult(dto.Message{}).
+		SetPathParam("channel_id", channelID).
+		SetFormData(form)
+	if len(fileImageData) > 0 {
+		req.SetFileReader("file_image", "filename.jpg", bytes.NewReader(fileImageData))
+	}
+	resp, err := baseRequest(ctx, req, http.MethodPost, o.getURL(messagesURI), opt...)
+	if err != nil {
+		return nil, err
+	}
+	return resp.Result().(*dto.Message), nil
+}
+
+func toJSON(v interface{}) string {
+	data, _ := json.Marshal(v)
+	return string(data)
 }
 
 func baseRequest(ctx context.Context, reqCMD *resty.Request, method, url string, opt ...options.Option) (

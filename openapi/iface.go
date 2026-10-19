@@ -320,6 +320,18 @@ type FormFileAPI interface {
 	PostFormFileReaderImage(
 		ctx context.Context, channelID string, m map[string]string, filename string, r io.Reader,
 	) (*dto.Message, error)
+	// PostMessageMultipart 发送频道消息（multipart/form-data，可带 file_image）
+	PostMessageMultipart(
+		ctx context.Context, channelID string, msg *dto.MessageToCreate, fileImageData []byte,
+		opt ...options.Option,
+	) (*dto.Message, error)
+}
+
+// ForumAPI 论坛帖子接口（可选扩展，未合入 OpenAPI）。
+type ForumAPI interface {
+	// PostForumThread 发表帖子
+	PostForumThread(ctx context.Context, channelID string, msg *dto.ForumThreadToCreate,
+		opt ...options.Option) (*dto.ForumThreadResp, error)
 }
 
 // StreamMessageAPI 流式消息接口（可选扩展，未合入 OpenAPI）。

@@ -52,6 +52,8 @@ const (
 	joinApprovalStrategyExecuteURI   uri = "/v2/groups/join_approval_strategy/{strategy_id}/execute"
 	joinApprovalStrategyWhitelistURI uri = "/v2/groups/join_approval_strategy/{strategy_id}/whitelist_users"
 
+	forumThreadsURI uri = "/channels/{channel_id}/threads"
+
 	menuURI        uri = "/v2/menu"
 	panelsURI      uri = "/v2/panels"
 	panelURI       uri = "/v2/panels/{panel_id}"
