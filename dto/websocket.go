@@ -31,12 +31,14 @@ type ShardConfig struct {
 type Session struct {
 	ID          string
 	URL         string
-	TokenSource oauth2.TokenSource
+	TokenSource oauth2.TokenSource `json:"-"` // 不序列化；Redis 消费端从本地配置重新注入
 	Intent      Intent
 	LastSeq     uint32
 	Shards      ShardConfig
 
 	AppID string
+	// AuthRetryCount 连续 4004 鉴权失败计数，重试一次仍失败则 Terminal。
+	AuthRetryCount int `json:"-"`
 }
 
 // String 输出session字符串

@@ -9,12 +9,16 @@ import (
 )
 
 func TestLock_Lock(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping redis integration test in short mode")
+	}
 	conn := redis.NewClient(&redis.Options{
 		Addr:         "localhost:6379",
 		DialTimeout:  800 * time.Millisecond,
 		ReadTimeout:  3 * time.Second,
 		WriteTimeout: 3 * time.Second,
 	})
+	defer func() { _ = conn.Close() }()
 
 	key := "lock-key-test"
 	value := "ddd"

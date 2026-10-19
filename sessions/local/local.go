@@ -4,24 +4,35 @@ package local
 import (
 	"context"
 	"fmt"
-	"strings"
+	"sync"
 	"time"
 
+	"github.com/cenkalti/backoff/v4"
+	"golang.org/x/oauth2"
+
 	"github.com/sealdice/botgo/dto"
+	"github.com/sealdice/botgo/errs"
 	"github.com/sealdice/botgo/log"
 	"github.com/sealdice/botgo/sessions/manager"
 	"github.com/sealdice/botgo/websocket"
-	"golang.org/x/oauth2"
 )
+
+const stableConnectionDuration = 30 * time.Second
 
 // New 创建本地session管理器
 func New() *ChanManager {
-	return &ChanManager{}
+	return &ChanManager{
+		fatalChan: make(chan error, 1),
+		backoffs:  make(map[string]*backoff.ExponentialBackOff),
+	}
 }
 
 // ChanManager 默认的本地 session manager 实现
 type ChanManager struct {
 	sessionChan chan dto.Session
+	fatalChan   chan error
+	backoffMu   sync.Mutex
+	backoffs    map[string]*backoff.ExponentialBackOff
 }
 
 // Start 启动本地 session manager
@@ -31,6 +42,18 @@ func (l *ChanManager) Start(ctx context.Context, apInfo *dto.WebsocketAP, tokenS
 		log.Errorf("[ws/session/local] session limited apInfo: %+v", apInfo)
 		return err
 	}
+
+	if l.fatalChan == nil {
+		l.fatalChan = make(chan error, 1)
+	}
+	l.backoffMu.Lock()
+	if l.backoffs == nil {
+		l.backoffs = make(map[string]*backoff.ExponentialBackOff)
+	}
+	l.backoffMu.Unlock()
+
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	startInterval := manager.CalcInterval(apInfo.SessionStartLimit.MaxConcurrency)
 	log.Infof("[ws/session/local] will start %d sessions and per session start interval is %s",
 		apInfo.Shards, startInterval)
@@ -57,18 +80,24 @@ func (l *ChanManager) Start(ctx context.Context, apInfo *dto.WebsocketAP, tokenS
 		l.sessionChan <- session
 	}
 
-	for session := range l.sessionChan {
+	for {
 		select {
-		case <-ctx.Done():
+		case <-runCtx.Done():
 			log.Infof("[ws/session/local] context done, stop start session")
 			return nil
-		default:
+		case err := <-l.fatalChan:
+			log.Errorf("[ws/session/local] terminal error: %v", err)
+			return err
+		case session := <-l.sessionChan:
 			// MaxConcurrency 代表的是每 5s 可以连多少个请求
-			time.Sleep(startInterval)
-			go l.newConnect(ctx, session)
+			select {
+			case <-runCtx.Done():
+				return nil
+			case <-time.After(startInterval):
+			}
+			go l.newConnect(runCtx, session)
 		}
 	}
-	return nil
 }
 
 // newConnect 启动一个新的连接，如果连接在监听过程中报错了，或者被远端关闭了链接，需要识别关闭的原因，能否继续 resume
@@ -76,19 +105,24 @@ func (l *ChanManager) Start(ctx context.Context, apInfo *dto.WebsocketAP, tokenS
 // 如果不能，则清理掉 sessionID，将 session 放入 sessionChan 中
 // session 的启动，交给 start 中的 for 循环执行，session 不自己递归进行重连，避免递归深度过深
 func (l *ChanManager) newConnect(ctx context.Context, session dto.Session) {
+	terminal := false
 	defer func() {
-		// panic 留下日志，放回 session
+		// panic 留下日志，按 transient 错误重排队；terminal 路径不再重排。
 		if err := recover(); err != nil {
 			websocket.PanicHandler(err, &session)
-			l.sessionChan <- session
+			if !terminal {
+				l.requeue(ctx, session)
+			}
 		}
 	}()
+
 	wsClient := websocket.ClientImpl.New(ctx, session)
 	if err := wsClient.Connect(); err != nil {
 		log.Error(err)
-		l.sessionChan <- session // 连接失败，丢回去队列排队重连
+		l.requeue(ctx, session)
 		return
 	}
+
 	var err error
 	// 如果 session id 不为空，则执行的是 resume 操作，如果为空，则执行的是 identify 操作
 	if session.ID != "" {
@@ -99,29 +133,124 @@ func (l *ChanManager) newConnect(ctx context.Context, session dto.Session) {
 	}
 	if err != nil {
 		log.Errorf("[ws/session] Identify/Resume err %+v", err)
+		terminal = l.handleSessionError(ctx, session, wsClient.Session(), err)
 		return
 	}
+
+	started := time.Now()
 	if err = wsClient.Listening(); err != nil {
 		log.Errorf("[ws/session] Listening err %+v", err)
-		currentSession := wsClient.Session()
-		// 如果是 4014 disallowed intents 错误，降级 intents 避开高级事件，ws没有权限，所以不进行后续请求
-		if strings.Contains(err.Error(), "4014") || strings.Contains(err.Error(), "disallowed intents") {
-			log.Infof("[ws/session] disallowed intents (4014) detected, downgrading intents to standard public bot intents")
-			currentSession.Intent = currentSession.Intent &^ (dto.IntentGroupMembers | dto.IntentEnterAIO)
+		if time.Since(started) >= stableConnectionDuration {
+			l.resetBackoff(session)
+			wsClient.Session().AuthRetryCount = 0
 		}
-		// 对于不能够进行重连的session，需要清空 session id 与 seq
-		if manager.CanNotResume(err) {
-			currentSession.ID = ""
-			currentSession.LastSeq = 0
-		}
-		// 一些错误不能够鉴权，比如机器人被封禁，这里就直接退出了
-		if manager.CanNotIdentify(err) {
-			msg := fmt.Sprintf("can not identify because server return %+v, so process exit", err)
-			log.Errorf(msg)
-			panic(msg) // 当机器人被下架，或者封禁，将不能再连接，所以 panic
-		}
-		// 将 session 放到 session chan 中，用于启动新的连接，当前连接退出
-		l.sessionChan <- *currentSession
+		terminal = l.handleSessionError(ctx, session, wsClient.Session(), err)
 		return
 	}
+
+	// ctx 取消导致的正常退出，不再重排。
+	if ctx.Err() != nil {
+		return
+	}
+	l.requeue(ctx, session)
+}
+
+func (l *ChanManager) handleSessionError(
+	ctx context.Context, original dto.Session, current *dto.Session, err error,
+) (terminal bool) {
+	if current == nil {
+		current = &original
+	}
+
+	switch manager.Classify(err) {
+	case manager.ActionTerminal:
+		l.signalFatal(err)
+		return true
+	case manager.ActionIdentify:
+		current.ID = ""
+		current.LastSeq = 0
+		switch errs.Error(err).Code() {
+		case errs.WSCodeBackendDisallowdIntents:
+			newIntent := current.Intent &^ (dto.IntentGroupMembers | dto.IntentEnterAIO)
+			if newIntent == current.Intent {
+				// 已经降级过仍然 4014，说明是其他 intent 无权限，停止重试。
+				l.signalFatal(err)
+				return true
+			}
+			log.Infof("[ws/session] disallowed intents (4014) detected, downgrade intents")
+			current.Intent = newIntent
+		case errs.WSCodeBackendAuthenticationFail:
+			// 4004：token 已强制刷新并重试过一次，仍失败说明凭据有问题，停止重试。
+			if current.AuthRetryCount >= 1 {
+				l.signalFatal(err)
+				return true
+			}
+			current.AuthRetryCount++
+		}
+	case manager.ActionResume:
+		// 保留 session ID 和 seq，直接 resume
+	case manager.ActionTransient:
+		// 网络/临时错误，保留 session ID 和 seq，退避后 resume
+	}
+
+	l.requeue(ctx, *current)
+	return false
+}
+
+func (l *ChanManager) signalFatal(err error) {
+	select {
+	case l.fatalChan <- err:
+	default:
+	}
+}
+
+func (l *ChanManager) requeue(ctx context.Context, session dto.Session) {
+	delay := l.nextBackoff(session)
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return
+	case <-timer.C:
+	}
+	select {
+	case l.sessionChan <- session:
+	case <-ctx.Done():
+	}
+}
+
+func (l *ChanManager) nextBackoff(session dto.Session) time.Duration {
+	key := backoffKey(session)
+	l.backoffMu.Lock()
+	b, ok := l.backoffs[key]
+	if !ok {
+		b = backoff.NewExponentialBackOff(
+			backoff.WithInitialInterval(time.Second),
+			backoff.WithMultiplier(2),
+			backoff.WithMaxInterval(60*time.Second),
+			backoff.WithRandomizationFactor(0.5),
+			backoff.WithMaxElapsedTime(0),
+		)
+		l.backoffs[key] = b
+	}
+	l.backoffMu.Unlock()
+
+	d := b.NextBackOff()
+	if d == backoff.Stop {
+		return 60 * time.Second
+	}
+	return d
+}
+
+func (l *ChanManager) resetBackoff(session dto.Session) {
+	key := backoffKey(session)
+	l.backoffMu.Lock()
+	if b, ok := l.backoffs[key]; ok {
+		b.Reset()
+	}
+	l.backoffMu.Unlock()
+}
+
+func backoffKey(session dto.Session) string {
+	return fmt.Sprintf("%s-%d-%d", session.AppID, session.Shards.ShardID, session.Shards.ShardCount)
 }
