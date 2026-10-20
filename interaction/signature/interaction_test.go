@@ -2,6 +2,7 @@ package signature
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -42,5 +43,27 @@ func TestVerify(t *testing.T) {
 				t.Errorf("Verify() got = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestVerifyMissingTimestampReturnsError(t *testing.T) {
+	header := http.Header{}
+	header.Set(HeaderSig, strings.Repeat("00", 64))
+	ok, err := Verify("secret", header, []byte("body"))
+	if ok {
+		t.Fatal("Verify should not accept missing timestamp")
+	}
+	if err == nil {
+		t.Fatal("Verify should return an error for missing timestamp")
+	}
+}
+
+func TestGenerateMissingTimestampReturnsError(t *testing.T) {
+	sig, err := Generate("secret", http.Header{}, []byte("body"))
+	if err == nil {
+		t.Fatal("Generate should return an error for missing timestamp")
+	}
+	if sig != "" {
+		t.Fatalf("Generate signature = %q, want empty", sig)
 	}
 }

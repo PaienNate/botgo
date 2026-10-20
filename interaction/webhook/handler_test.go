@@ -3,6 +3,7 @@ package webhook
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -133,6 +134,139 @@ func TestHandlerDedupByMessageID(t *testing.T) {
 	}
 	if called != 1 {
 		t.Fatalf("handler called %d times, want 1", called)
+	}
+}
+
+func TestHandlerMarksDedupBeforeDispatch(t *testing.T) {
+	appID := fmt.Sprintf("test-inflight-%d", time.Now().UnixNano())
+	entered := make(chan struct{}, 2)
+	release := make(chan struct{})
+	var called int32
+	event.RegisterHandlersByAppID(appID, event.GroupATMessageEventHandler(
+		func(_ *dto.WSPayload, _ *dto.WSGroupATMessageData) error {
+			atomic.AddInt32(&called, 1)
+			entered <- struct{}{}
+			<-release
+			return nil
+		},
+	))
+
+	body := []byte(`{
+		"id":"event-inflight",
+		"op":0,
+		"t":"GROUP_AT_MESSAGE_CREATE",
+		"d":{
+			"id":"msg-inflight",
+			"content":"1d100",
+			"group_openid":"group-1",
+			"author":{"member_openid":"user-1"},
+			"timestamp":"2024-10-15T16:33:15+08:00"
+		}
+	}`)
+	handler := NewHandler(HandlerOptions{
+		Credentials: &token.QQBotCredentials{AppID: appID, AppSecret: "secret"},
+		Deduper:     NewTTLDeduper(time.Minute, 100),
+	})
+
+	firstDone := make(chan struct{})
+	go func() {
+		defer close(firstDone)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, signedRequest(t, body, "secret"))
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("first handler did not start")
+	}
+
+	// 第一次处理还没结束时，平台重试同一条事件。此时应直接 ACK，不能再次进入业务处理。
+	secondDone := make(chan struct{})
+	go func() {
+		defer close(secondDone)
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, signedRequest(t, body, "secret"))
+		if rec.Code != http.StatusOK {
+			t.Errorf("second status = %d, want 200", rec.Code)
+		}
+		var ackMsg ack
+		if err := json.Unmarshal(rec.Body.Bytes(), &ackMsg); err != nil {
+			t.Errorf("second ack unmarshal: %v", err)
+		} else if ackMsg.Op != dto.HTTPCallbackAck || ackMsg.Data != 0 {
+			t.Errorf("second ack = %+v, want op 12 d 0", ackMsg)
+		}
+	}()
+
+	select {
+	case <-secondDone:
+	case <-time.After(500 * time.Millisecond):
+		close(release)
+		t.Fatal("duplicate in-flight event was not ACKed promptly")
+	}
+
+	close(release)
+	select {
+	case <-firstDone:
+	case <-time.After(time.Second):
+		t.Fatal("first request did not finish")
+	}
+	if got := atomic.LoadInt32(&called); got != 1 {
+		t.Fatalf("handler called %d times, want 1", got)
+	}
+}
+
+func TestHandlerUnmarksDedupOnDispatchFailure(t *testing.T) {
+	appID := fmt.Sprintf("test-failure-%d", time.Now().UnixNano())
+	var called int32
+	event.RegisterHandlersByAppID(appID, event.GroupATMessageEventHandler(
+		func(_ *dto.WSPayload, _ *dto.WSGroupATMessageData) error {
+			if atomic.AddInt32(&called, 1) == 1 {
+				return errors.New("boom")
+			}
+			return nil
+		},
+	))
+
+	body := []byte(`{
+		"id":"event-failure",
+		"op":0,
+		"t":"GROUP_AT_MESSAGE_CREATE",
+		"d":{
+			"id":"msg-failure",
+			"content":"1d100",
+			"group_openid":"group-1",
+			"author":{"member_openid":"user-1"},
+			"timestamp":"2024-10-15T16:33:15+08:00"
+		}
+	}`)
+	handler := NewHandler(HandlerOptions{
+		Credentials: &token.QQBotCredentials{AppID: appID, AppSecret: "secret"},
+		Deduper:     NewTTLDeduper(time.Minute, 100),
+		ErrorHandler: func(error) {
+		},
+	})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, signedRequest(t, body, "secret"))
+	var ackMsg ack
+	if err := json.Unmarshal(rec.Body.Bytes(), &ackMsg); err != nil {
+		t.Fatal(err)
+	}
+	if ackMsg.Data != 1 {
+		t.Fatalf("first ack = %+v, want d=1", ackMsg)
+	}
+
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, signedRequest(t, body, "secret"))
+	if err := json.Unmarshal(rec.Body.Bytes(), &ackMsg); err != nil {
+		t.Fatal(err)
+	}
+	if ackMsg.Data != 0 {
+		t.Fatalf("second ack = %+v, want d=0", ackMsg)
+	}
+	if got := atomic.LoadInt32(&called); got != 2 {
+		t.Fatalf("handler called %d times, want 2", got)
 	}
 }
 

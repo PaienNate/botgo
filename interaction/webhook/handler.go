@@ -151,8 +151,11 @@ func (h *Handler) handleDispatch(w http.ResponseWriter, payload *dto.WSPayload) 
 		return
 	}
 
+	// 在开始处理前就标记，避免平台超时重试与第一次处理并发执行，
+	// 导致同一条消息被执行两次。处理失败时再撤销标记，让平台可以重试。
+	dedup.MarkAll(h.opts.Deduper, dedupKeys)
+
 	if h.opts.AckMode == AckAsync {
-		dedup.MarkAll(h.opts.Deduper, dedupKeys)
 		writeJSON(w, http.StatusOK, GenDispatchACK(true))
 		go func() {
 			if err := dispatch(payload); err != nil {
@@ -165,10 +168,10 @@ func (h *Handler) handleDispatch(w http.ResponseWriter, payload *dto.WSPayload) 
 
 	if err := dispatch(payload); err != nil {
 		h.reportError(err)
+		dedup.UnmarkAll(h.opts.Deduper, dedupKeys)
 		writeJSON(w, http.StatusOK, GenDispatchACK(false))
 		return
 	}
-	dedup.MarkAll(h.opts.Deduper, dedupKeys)
 	writeJSON(w, http.StatusOK, GenDispatchACK(true))
 }
 
