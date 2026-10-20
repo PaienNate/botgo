@@ -341,3 +341,81 @@ func TestClientCloseCodeMapping(t *testing.T) {
 		})
 	}
 }
+
+func TestHandlePayloadHandlerPanicDropped(t *testing.T) {
+	appID := fmt.Sprintf("panic-drop-test-%d", time.Now().UnixNano())
+	var panicCalls, normalCalls int32
+	event.RegisterHandlersByAppID(appID, event.GroupATMessageEventHandler(
+		func(_ *dto.WSPayload, data *dto.WSGroupATMessageData) error {
+			if data.Content == "panic" {
+				atomic.AddInt32(&panicCalls, 1)
+				panic("handler boom")
+			}
+			atomic.AddInt32(&normalCalls, 1)
+			return nil
+		},
+	))
+
+	c := (&Client{}).New(context.Background(), dto.Session{AppID: appID}).(*Client)
+	payload := &dto.WSPayload{
+		WSPayloadBase: dto.WSPayloadBase{
+			OPCode:  dto.WSDispatchEvent,
+			Type:    dto.EventGroupAtMessageCreate,
+			EventID: "event-panic",
+			Seq:     3,
+		},
+		RawMessage: []byte(`{
+			"id":"event-panic",
+			"op":0,
+			"s":3,
+			"t":"GROUP_AT_MESSAGE_CREATE",
+			"d":{
+				"id":"msg-panic",
+				"content":"panic",
+				"group_openid":"group-1",
+				"author":{"member_openid":"user-1"},
+				"timestamp":"2024-10-15T16:33:15+08:00"
+			}
+		}`),
+		Session: c.session,
+	}
+
+	// 不应 panic；panic 事件应被捕获并标记为已处理，重放不会再执行。
+	c.handlePayload(payload)
+	c.handlePayload(payload)
+
+	if got := atomic.LoadInt32(&panicCalls); got != 1 {
+		t.Fatalf("panic handler called %d times, want 1", got)
+	}
+	if c.session.LastSeq != 3 {
+		t.Fatalf("LastSeq = %d, want 3", c.session.LastSeq)
+	}
+
+	// 后续普通消息仍应正常处理，证明连接/读循环没有被 panic 拖垮。
+	normal := &dto.WSPayload{
+		WSPayloadBase: dto.WSPayloadBase{
+			OPCode:  dto.WSDispatchEvent,
+			Type:    dto.EventGroupAtMessageCreate,
+			EventID: "event-normal",
+			Seq:     4,
+		},
+		RawMessage: []byte(`{
+			"id":"event-normal",
+			"op":0,
+			"s":4,
+			"t":"GROUP_AT_MESSAGE_CREATE",
+			"d":{
+				"id":"msg-normal",
+				"content":"normal",
+				"group_openid":"group-1",
+				"author":{"member_openid":"user-1"},
+				"timestamp":"2024-10-15T16:33:15+08:00"
+			}
+		}`),
+		Session: c.session,
+	}
+	c.handlePayload(normal)
+	if got := atomic.LoadInt32(&normalCalls); got != 1 {
+		t.Fatalf("normal handler called %d times, want 1", got)
+	}
+}

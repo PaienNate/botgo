@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"runtime/debug"
 
 	"github.com/sealdice/botgo/dto"
 	"github.com/sealdice/botgo/event"
@@ -161,9 +160,20 @@ func (h *Handler) handleDispatch(w http.ResponseWriter, payload *dto.WSPayload) 
 	if h.opts.AckMode == AckAsync {
 		writeJSON(w, http.StatusOK, GenDispatchACK(true))
 		go func() {
+			// 异步路径不在 net/http 的 panic 保护范围内，必须自己兜底。
+			defer func() {
+				if r := recover(); r != nil {
+					log.Errorf("[QQBot][webhook] 异步处理 panic app=%s event_id=%s: %v",
+						h.appID(), payload.EventID, event.NewPanicError("webhook async", r))
+				}
+			}()
 			if err := dispatch(payload); err != nil {
 				h.reportError(err, payload)
-				dedup.UnmarkAll(h.opts.Deduper, dedupKeys)
+				// panic 通常是确定性代码问题，保留去重标记，避免平台反复重试；
+				// 普通 error 则撤销标记，让平台可以重试。
+				if !event.IsPanic(err) {
+					dedup.UnmarkAll(h.opts.Deduper, dedupKeys)
+				}
 			}
 		}()
 		return
@@ -171,6 +181,11 @@ func (h *Handler) handleDispatch(w http.ResponseWriter, payload *dto.WSPayload) 
 
 	if err := dispatch(payload); err != nil {
 		h.reportError(err, payload)
+		if event.IsPanic(err) {
+			// 已经记录 panic 堆栈；ACK 成功以避免同一条事件无限重试。
+			writeJSON(w, http.StatusOK, GenDispatchACK(true))
+			return
+		}
 		dedup.UnmarkAll(h.opts.Deduper, dedupKeys)
 		writeJSON(w, http.StatusOK, GenDispatchACK(false))
 		return
@@ -187,7 +202,15 @@ func (h *Handler) appID() string {
 
 func (h *Handler) reportError(err error, payload *dto.WSPayload) {
 	if h.opts.ErrorHandler != nil {
-		h.opts.ErrorHandler(err)
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Errorf("[QQBot][webhook] 自定义 ErrorHandler panic app=%s: %v；原始错误: %v",
+						h.appID(), event.NewPanicError("ErrorHandler", r), err)
+				}
+			}()
+			h.opts.ErrorHandler(err)
+		}()
 		return
 	}
 	eventID, eventType := "", dto.EventType("")
@@ -202,7 +225,7 @@ func (h *Handler) reportError(err error, payload *dto.WSPayload) {
 func dispatch(payload *dto.WSPayload) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			err = fmt.Errorf("panic: %v\n%s", r, debug.Stack())
+			err = event.NewPanicError("webhook handler", r)
 		}
 	}()
 	return event.ParseAndHandle(payload)

@@ -282,10 +282,12 @@ func TestHandlerInvalidSignature(t *testing.T) {
 	}
 }
 
-func TestHandlerPanicReturnsRetryACK(t *testing.T) {
+func TestHandlerPanicIsCapturedAndACKed(t *testing.T) {
 	appID := fmt.Sprintf("test-panic-%d", time.Now().UnixNano())
+	var called int32
 	event.RegisterHandlersByAppID(appID, event.GroupATMessageEventHandler(
 		func(_ *dto.WSPayload, _ *dto.WSGroupATMessageData) error {
+			atomic.AddInt32(&called, 1)
 			panic("boom")
 		},
 	))
@@ -302,21 +304,39 @@ func TestHandlerPanicReturnsRetryACK(t *testing.T) {
 			"timestamp":"2024-10-15T16:33:15+08:00"
 		}
 	}`)
-	req := signedRequest(t, body, "secret")
-	rec := httptest.NewRecorder()
-	NewHandler(HandlerOptions{
+	var sawPanic bool
+	handler := NewHandler(HandlerOptions{
 		Credentials: &token.QQBotCredentials{AppID: appID, AppSecret: "secret"},
-	}).ServeHTTP(rec, req)
+		Deduper:     NewTTLDeduper(time.Minute, 100),
+		ErrorHandler: func(err error) {
+			if event.IsPanic(err) {
+				sawPanic = true
+			}
+		},
+	})
 
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
+	for i := 0; i < 2; i++ {
+		req := signedRequest(t, body, "secret")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rec.Code)
+		}
+		var ackMsg ack
+		if err := json.Unmarshal(rec.Body.Bytes(), &ackMsg); err != nil {
+			t.Fatal(err)
+		}
+		// panic 后 ACK 成功并保留去重标记，避免平台对确定性 panic 无限重试。
+		if ackMsg.Op != dto.HTTPCallbackAck || ackMsg.Data != 0 {
+			t.Fatalf("unexpected panic ack: %+v", ackMsg)
+		}
 	}
-	var ackMsg ack
-	if err := json.Unmarshal(rec.Body.Bytes(), &ackMsg); err != nil {
-		t.Fatal(err)
+	if !sawPanic {
+		t.Fatal("expected panic error to be reported")
 	}
-	if ackMsg.Op != dto.HTTPCallbackAck || ackMsg.Data != 1 {
-		t.Fatalf("unexpected panic ack: %+v", ackMsg)
+	if got := atomic.LoadInt32(&called); got != 1 {
+		t.Fatalf("handler called %d times, want 1", got)
 	}
 }
 
@@ -326,5 +346,49 @@ func TestHandlerMethodNotAllowed(t *testing.T) {
 	NewHandler(HandlerOptions{}).ServeHTTP(rec, req)
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("status = %d, want 405", rec.Code)
+	}
+}
+
+func TestHandlerErrorHandlerPanicIsContained(t *testing.T) {
+	appID := fmt.Sprintf("test-error-handler-panic-%d", time.Now().UnixNano())
+	event.RegisterHandlersByAppID(appID, event.GroupATMessageEventHandler(
+		func(_ *dto.WSPayload, _ *dto.WSGroupATMessageData) error {
+			return errors.New("handler boom")
+		},
+	))
+
+	body := []byte(`{
+		"id":"event-error-handler-panic",
+		"op":0,
+		"t":"GROUP_AT_MESSAGE_CREATE",
+		"d":{
+			"id":"msg-error-handler-panic",
+			"content":"1d100",
+			"group_openid":"group-1",
+			"author":{"member_openid":"user-1"},
+			"timestamp":"2024-10-15T16:33:15+08:00"
+		}
+	}`)
+	handler := NewHandler(HandlerOptions{
+		Credentials: &token.QQBotCredentials{AppID: appID, AppSecret: "secret"},
+		Deduper:     NewTTLDeduper(time.Minute, 100),
+		ErrorHandler: func(error) {
+			panic("error handler boom")
+		},
+	})
+
+	req := signedRequest(t, body, "secret")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var ackMsg ack
+	if err := json.Unmarshal(rec.Body.Bytes(), &ackMsg); err != nil {
+		t.Fatal(err)
+	}
+	// 普通 handler error 仍返回 d=1，让平台重试；ErrorHandler 的 panic 不应影响回包。
+	if ackMsg.Data != 1 {
+		t.Fatalf("ack = %+v, want d=1", ackMsg)
 	}
 }

@@ -28,7 +28,7 @@ func RegisterResumeSignal(signal syscall.Signal) {
 }
 
 // PanicBufLen Panic 堆栈大小
-var PanicBufLen = 1024
+var PanicBufLen = 4096
 
 // PanicHandler 处理websocket场景的 panic ，打印堆栈
 func PanicHandler(e interface{}, session *dto.Session) {

@@ -232,7 +232,15 @@ func (c *Client) Connect() error {
 func (c *Client) Listening() error {
 	defer c.Close()
 
-	go c.conn.ReadLoop()
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				websocket.PanicHandler(r, c.session)
+				c.signalClose(fmt.Errorf("read loop panic: %v", r))
+			}
+		}()
+		c.conn.ReadLoop()
+	}()
 	go c.listenMessageAndHandle()
 
 	// transportPingTicker 在 New 中创建，Stop 统一由 Close 持锁执行。
@@ -419,7 +427,14 @@ func (c *Client) classifyCloseError(err error) error {
 	}
 
 	if event.DefaultHandlers.ErrorNotify != nil {
-		event.DefaultHandlers.ErrorNotify(err)
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Errorf("[QQBot][ws] ErrorNotify panic: %v", event.NewPanicError("ErrorNotify", r))
+				}
+			}()
+			event.DefaultHandlers.ErrorNotify(err)
+		}()
 	}
 	return err
 }
@@ -454,8 +469,22 @@ func (c *Client) listenMessageAndHandle() {
 }
 
 func (c *Client) handlePayload(payload *dto.WSPayload) {
+	if payload == nil {
+		return
+	}
 	// 去重：同时使用顶层 event id 和消息体 d.id（msg_id）。
 	dedupKeys := dedup.Keys(payload)
+	// 最后一道保险：即使去重、ready 回调或日志以外的代码 panic，也只丢弃当前事件，
+	// 不再让读循环退出、整条连接重连。
+	defer func() {
+		if r := recover(); r != nil {
+			websocket.PanicHandler(r, c.session)
+			dedup.MarkAll(c.deduper, dedupKeys)
+			if c.seqPolicy == SeqAfterHandle {
+				c.saveSeq(payload.Seq)
+			}
+		}
+	}()
 	if dedup.SeenAny(c.deduper, dedupKeys) {
 		log.Debugf("%s duplicate event %s, skip", c.session, payload.EventID)
 		c.saveSeq(payload.Seq)
@@ -477,6 +506,16 @@ func (c *Client) handlePayload(payload *dto.WSPayload) {
 
 	// 解析具体事件，并投递给业务注册的 handler
 	if err := event.ParseAndHandle(payload); err != nil {
+		if event.IsPanic(err) {
+			// 处理器 panic 往往是确定性的，重放只会再次 panic；记录后丢弃该事件，
+			// 保证连接和后续消息不受影响。
+			log.Errorf("%s handler panic, event dropped: %v", c.session, err)
+			dedup.MarkAll(c.deduper, dedupKeys)
+			if c.seqPolicy == SeqAfterHandle {
+				c.saveSeq(payload.Seq)
+			}
+			return
+		}
 		log.Errorf("%s parseAndHandle failed, %v", c.session, err)
 		// SeqAfterHandle 时不推进 seq，等 resume 重放；
 		// 由于没有 Mark，重放不会被去重跳过。

@@ -3,12 +3,46 @@ package event
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
+	"runtime/debug"
 	"sync"
 
 	"github.com/tidwall/gjson" // 由于回包的d 类型不确定，gjson 用于从回包json中提可d 并进行针瀵规€х殑瑙ｆ瀽
 
 	"github.com/sealdice/botgo/dto"
+	"github.com/sealdice/botgo/log"
 )
+
+// PanicError 表示事件处理器/过滤器/观察者发生了 panic。
+// 调用方可以用 IsPanic 判断，并决定丢弃事件还是重试。
+type PanicError struct {
+	Scope string
+	Value interface{}
+	Stack []byte
+}
+
+func (e *PanicError) Error() string {
+	if e == nil {
+		return "event panic"
+	}
+	return fmt.Sprintf("%s panic: %v\n%s", e.Scope, e.Value, e.Stack)
+}
+
+// IsPanic 判断错误是否由事件处理器 panic 产生。
+func IsPanic(err error) bool {
+	var target *PanicError
+	return errors.As(err, &target)
+}
+
+// NewPanicError 构造带堆栈的 panic 错误，供其它分发入口复用。
+func NewPanicError(scope string, value interface{}) error {
+	return &PanicError{Scope: scope, Value: value, Stack: debug.Stack()}
+}
+
+func logPanic(scope string, value interface{}) {
+	log.Errorf("[QQBot][event] %s panic: %v\n%s", scope, value, debug.Stack())
+}
 
 var eventParseFuncMapLock = new(sync.RWMutex)
 
@@ -172,7 +206,11 @@ func applyFilters(payload *dto.WSPayload) bool {
 	for _, entry := range snapshot {
 		ok := false
 		func() {
-			defer func() { _ = recover() }()
+			defer func() {
+				if r := recover(); r != nil {
+					logPanic("filter", r)
+				}
+			}()
 			ok = entry.fn(payload)
 		}()
 		if !ok {
@@ -188,13 +226,25 @@ func notifyObservers(payload *dto.WSPayload) {
 	observerMu.RUnlock()
 	for _, entry := range snapshot {
 		func() {
-			defer func() { _ = recover() }()
+			defer func() {
+				if r := recover(); r != nil {
+					logPanic("observer", r)
+				}
+			}()
 			entry.fn(payload)
 		}()
 	}
 }
 
-func ParseAndHandle(payload *dto.WSPayload) error {
+func ParseAndHandle(payload *dto.WSPayload) (err error) {
+	// 处理器 panic 不应该冒泡到 websocket 读循环/HTTP server，否则一条消息
+	// 就可能拖垮整个连接。这里统一转换成 PanicError，由调用方记录并决定丢弃。
+	defer func() {
+		if r := recover(); r != nil {
+			err = NewPanicError("event handler", r)
+		}
+	}()
+
 	if !applyFilters(payload) {
 		return nil
 	}

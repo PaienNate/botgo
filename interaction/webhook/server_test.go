@@ -56,3 +56,27 @@ func TestServerValidationAndUnknownAppID(t *testing.T) {
 		t.Fatalf("unknown appid status = %d, want 401", resp.StatusCode)
 	}
 }
+
+func TestServerResolverPanicIsContained(t *testing.T) {
+	server := NewServer(ServerOptions{
+		Resolve: func(string) (*token.QQBotCredentials, error) {
+			panic("resolver boom")
+		},
+	})
+	ts := httptest.NewServer(server.Handler())
+	defer ts.Close()
+
+	req, err := http.NewRequest(http.MethodPost, ts.URL, strings.NewReader(`{"op":13,"d":{}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("X-Bot-Appid", "app")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", resp.StatusCode)
+	}
+}

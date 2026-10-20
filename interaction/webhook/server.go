@@ -4,11 +4,14 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"net/http"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/sealdice/botgo/log"
 	"github.com/sealdice/botgo/token"
 )
 
@@ -78,7 +81,7 @@ func (s *Server) Handler() http.Handler {
 			writeError(w, http.StatusInternalServerError, "credentials resolver is nil")
 			return
 		}
-		credentials, err := s.opts.Resolve(appID)
+		credentials, err := resolveCredentials(s.opts.Resolve, appID)
 		if err != nil || credentials == nil {
 			writeError(w, http.StatusUnauthorized, "unknown appid")
 			return
@@ -149,6 +152,17 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		return errors.New("webhook server is not running")
 	}
 	return server.Shutdown(ctx)
+}
+
+func resolveCredentials(resolve CredentialsResolver, appID string) (credentials *token.QQBotCredentials, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			credentials = nil
+			err = fmt.Errorf("credentials resolver panic: %v\n%s", r, debug.Stack())
+			log.Errorf("[QQBot][webhook] %v", err)
+		}
+	}()
+	return resolve(appID)
 }
 
 func extractAppID(r *http.Request, path string) string {
