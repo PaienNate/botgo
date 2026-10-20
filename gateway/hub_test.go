@@ -87,6 +87,9 @@ func TestHubBroadcast(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("client open timeout")
 	}
+	// 客户端 OnOpen 早于服务端 register 完成；等到 hello 帧说明 Hub 已登记该连接，
+	// 否则 Broadcast 可能发生在登记之前而丢帧（全量测试并行时容易触发）。
+	handler.waitFor(t, "hello")
 
 	hub.Broadcast("app-1", &dto.WSPayload{
 		WSPayloadBase: dto.WSPayloadBase{
