@@ -10,6 +10,7 @@ import (
 	"io"
 	"math/rand"
 	"net/http"
+	"runtime/debug"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -124,16 +125,24 @@ func NewQQBotTokenSource(credentials *QQBotCredentials) oauth2.TokenSource {
 }
 
 // Token 获取access token
-func (w *QQBotTokenSource) Token() (*oauth2.Token, error) {
-	if token, ok := w.loadValidToken(); ok {
-		return token, nil
+func (w *QQBotTokenSource) Token() (token *oauth2.Token, err error) {
+	// 自定义实现/异常配置可能让底层代码 panic，这里统一转为 error。
+	defer func() {
+		if r := recover(); r != nil {
+			token = nil
+			err = fmt.Errorf("token source panic: %v\n%s", r, debug.Stack())
+		}
+	}()
+
+	if cached, ok := w.loadValidToken(); ok {
+		return cached, nil
 	}
 
 	// 获取新的 access token
 	newToken, err, _ := w.sg.Do("retrieve access token", func() (interface{}, error) {
 		// singleflight 内二次检查，避免并发请求重复刷新
-		if token, ok := w.loadValidToken(); ok {
-			return token, nil
+		if cached, ok := w.loadValidToken(); ok {
+			return cached, nil
 		}
 		return w.getNewToken()
 	})
@@ -278,17 +287,39 @@ func currentRefreshErrorHandler() RefreshErrorHandler {
 	return refreshErrorHandler
 }
 
+func runRefreshErrorHandler(h RefreshErrorHandler, appID string, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Errorf("[QQBot][token] RefreshErrorHandler panic app=%s: %v\n%s", appID, r, debug.Stack())
+		}
+	}()
+	h(err)
+}
+
 // StartRefreshAccessToken 启动获取AccessToken的后台刷新
-func StartRefreshAccessToken(ctx context.Context, tokenSource oauth2.TokenSource) error {
-	tk, err := tokenSource.Token()
-	if err != nil {
-		return err
-	}
+func StartRefreshAccessToken(ctx context.Context, tokenSource oauth2.TokenSource) (err error) {
 	appID := ""
 	if source, ok := tokenSource.(interface{ GetAppID() string }); ok {
 		appID = source.GetAppID()
 	}
+	// 自定义 token source 的 Token() 也可能 panic，入口先兜底。
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("token source panic: %v\n%s", r, debug.Stack())
+			log.Errorf("[QQBot][token] 获取 token 时 panic app=%s: %v", appID, err)
+		}
+	}()
+
+	tk, err := tokenSource.Token()
+	if err != nil {
+		return err
+	}
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Errorf("[QQBot][token] 刷新协程 panic app=%s: %v\n%s", appID, r, debug.Stack())
+			}
+		}()
 		for {
 			ttlSeconds := tk.ExpiresIn
 			if ttlSeconds <= 0 && !tk.Expiry.IsZero() {
@@ -319,7 +350,7 @@ func StartRefreshAccessToken(ctx context.Context, tokenSource oauth2.TokenSource
 				return refreshErr
 			}, backoff.WithContext(b, ctx), func(err error, d time.Duration) {
 				if h := currentRefreshErrorHandler(); h != nil {
-					h(err)
+					runRefreshErrorHandler(h, appID, err)
 				}
 				log.Errorf("[QQBot][token] 刷新 access_token 失败 app=%s: %v；%v 后重试", appID, err, d)
 			})

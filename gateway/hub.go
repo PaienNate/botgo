@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 
 	"github.com/sealdice/botgo/dto"
 	"github.com/sealdice/botgo/event"
+	"github.com/sealdice/botgo/log"
 )
 
 const (
@@ -73,9 +75,15 @@ func NewHub(opts HubOptions) *Hub {
 	h.upgrader = gws.NewUpgrader(&hubHandler{hub: h}, &gws.ServerOption{
 		ParallelEnabled: false,
 		Recovery:        gws.Recovery,
-		Authorize: func(r *http.Request, session gws.SessionStorage) bool {
-			appID, ok := h.opts.Authorize(r)
-			if !ok || appID == "" {
+		Authorize: func(r *http.Request, session gws.SessionStorage) (ok bool) {
+			defer func() {
+				if rec := recover(); rec != nil {
+					log.Errorf("[QQBot][gateway] Authorize panic: %v\n%s", rec, debug.Stack())
+					ok = false
+				}
+			}()
+			appID, allowed := h.opts.Authorize(r)
+			if !allowed || appID == "" {
 				return false
 			}
 			session.Store("appid", appID)

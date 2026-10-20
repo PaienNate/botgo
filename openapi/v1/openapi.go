@@ -5,9 +5,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -79,7 +81,13 @@ func (o *openAPI) SetDebug(debug bool) openapi.OpenAPI {
 // Transport 透传请求
 func (o *openAPI) Transport(ctx context.Context, method, url string, body interface{}) ([]byte, error) {
 	resp, err := o.request(ctx).SetBody(body).Execute(method, url)
-	return resp.Body(), err
+	if err != nil {
+		return nil, err
+	}
+	if resp == nil {
+		return nil, errs.ErrEmptyResponse
+	}
+	return resp.Body(), nil
 }
 
 // 初始化 client
@@ -105,7 +113,7 @@ func (o *openAPI) setupClient(appID string) {
 		).
 		OnBeforeRequest(
 			func(c *resty.Client, r *resty.Request) error {
-				tk, err := o.tokenSource.Token()
+				tk, err := safeToken(o.tokenSource)
 				if err != nil {
 					log.Errorf("[QQBot][openapi] 获取 access_token 失败 app=%s: %v；请检查 AppID/AppSecret、网络和 token 接口状态", o.appID, err)
 					return err
@@ -262,7 +270,25 @@ func isTokenExpiredResponse(resp *resty.Response) bool {
 	return ok && code == errs.APICodeTokenExpireOrNotExist
 }
 
+func safeToken(tokenSource oauth2.TokenSource) (tk *oauth2.Token, err error) {
+	if tokenSource == nil {
+		return nil, errors.New("token source is nil")
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			tk = nil
+			err = fmt.Errorf("token source panic: %v\n%s", r, debug.Stack())
+		}
+	}()
+	return tokenSource.Token()
+}
+
 func forceRefreshToken(tokenSource oauth2.TokenSource) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Errorf("[QQBot][openapi] 强制刷新 token 时 panic: %v\n%s", r, debug.Stack())
+		}
+	}()
 	if refreshable, ok := tokenSource.(interface {
 		ForceRefresh() (*oauth2.Token, error)
 	}); ok {

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -109,7 +110,16 @@ func (r *RedisManager) Start(ctx context.Context, apInfo *dto.WebsocketAP, token
 			log.Errorf("[ws/session/redis] distribute sessions failed: %v", err)
 			return err
 		}
-		go distributeLock.StartRenew(runCtx, distributeLockExpireTime)
+		go func() {
+			defer func() {
+				if rec := recover(); rec != nil {
+					panicErr := fmt.Errorf("distribute lock renew panic: %v\n%s", rec, debug.Stack())
+					log.Errorf("[QQBot][ws/session/redis] %v", panicErr)
+					r.signalFatal(panicErr)
+				}
+			}()
+			distributeLock.StartRenew(runCtx, distributeLockExpireTime)
+		}()
 	} else {
 		log.Errorf("got lock failed, err: %v", err)
 	}
@@ -117,10 +127,26 @@ func (r *RedisManager) Start(ctx context.Context, apInfo *dto.WebsocketAP, token
 	// 持续 produce session，遇到网络问题在 chan 中重试
 	// 对于抢到了锁的服务，生产第一批session到redis list
 	// 对于没有抢到锁的服务，当ws异常，把session放回到 redis list 中，重新分发
-	go r.sessionProducer(startInterval, r.stopChan)
+	go func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				panicErr := fmt.Errorf("session producer panic: %v\n%s", rec, debug.Stack())
+				log.Errorf("[QQBot][ws/session/redis] %v", panicErr)
+				r.signalFatal(panicErr)
+			}
+		}()
+		r.sessionProducer(startInterval, r.stopChan)
+	}()
 
 	consumeErr := make(chan error, 1)
 	go func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				panicErr := fmt.Errorf("session consumer panic: %v\n%s", rec, debug.Stack())
+				log.Errorf("[QQBot][ws/session/redis] %v", panicErr)
+				consumeErr <- panicErr
+			}
+		}()
 		consumeErr <- r.consume(runCtx, startInterval)
 	}()
 
