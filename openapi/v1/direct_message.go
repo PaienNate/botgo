@@ -39,7 +39,7 @@ func (o *openAPI) PostDirectMessage(ctx context.Context,
 		resp, err := baseRequest(ctx, reqCMD, http.MethodPost, o.getURL(dmsURI), opt...)
 		return decodeMessage(resp, err)
 	}
-	return sendMessageWithFallback(ctx, msg, opts, send)
+	return o.sendMessageWithFallback(ctx, "dm:"+dm.GuildID, msg, opts, send)
 }
 
 // RetractDMMessage 撤回私信消息

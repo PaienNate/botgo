@@ -82,7 +82,7 @@ func (o *openAPI) PostMessage(ctx context.Context, channelID string, msg *dto.Me
 		resp, err := baseRequest(ctx, reqCMD, http.MethodPost, o.getURL(messagesURI), opt...)
 		return decodeMessage(resp, err)
 	}
-	return sendMessageWithFallback(ctx, msg, opts, send)
+	return o.sendMessageWithFallback(ctx, "channel:"+channelID, msg, opts, send)
 }
 
 // PatchMessage 编辑消息
@@ -181,7 +181,7 @@ func (o *openAPI) PostGroupMessage(ctx context.Context, groupID string, msg dto.
 		resp, err := baseRequest(ctx, reqCMD, http.MethodPost, o.getURL(getGroupURIBySendType(m.GetSendType())), opt...)
 		return decodeMessage(resp, err)
 	}
-	return sendMessageWithFallback(ctx, msg, opts, send)
+	return o.sendMessageWithFallback(ctx, "group:"+groupID, msg, opts, send)
 }
 
 func getC2CURIBySendType(msgType dto.SendType) uri {
@@ -209,7 +209,7 @@ func (o *openAPI) PostC2CMessage(ctx context.Context, userID string, msg dto.API
 		resp, err := baseRequest(ctx, reqCMD, http.MethodPost, o.getURL(getC2CURIBySendType(m.GetSendType())), opt...)
 		return decodeMessage(resp, err)
 	}
-	return sendMessageWithFallback(ctx, msg, opts, send)
+	return o.sendMessageWithFallback(ctx, "c2c:"+userID, msg, opts, send)
 }
 
 // PostGroupFile 上传群文件（富媒体）
@@ -224,7 +224,12 @@ func (o *openAPI) PostGroupFile(ctx context.Context, groupID string,
 		SetBody(msg)
 
 	resp, err := reqCMD.Execute(http.MethodPost, o.getURL(groupRichMediaURI))
-	return decodeMedia(resp, err)
+	media, err := decodeMedia(resp, err)
+	if err != nil {
+		log.Errorf("[QQBot][openapi] 上传群文件失败 app=%s group=%s code=%d trace=%s err=%s；请检查文件大小/类型、机器人权限或平台状态",
+			o.appID, groupID, errorCode(err), errs.Error(err).Trace(), truncateLog(err.Error(), 600))
+	}
+	return media, err
 }
 
 // PostFormFileImage 频道图片表单上传。
@@ -237,10 +242,12 @@ func (o *openAPI) PostFormFileImage(
 		SetFormData(m).
 		SetFile("file_image", path).
 		Post(o.getURL(messagesURI))
+	result, err := decodeMessage(resp, err)
 	if err != nil {
-		return nil, err
+		log.Errorf("[QQBot][openapi] 频道图片上传失败 app=%s channel=%s code=%d trace=%s err=%s；请检查图片大小/格式和机器人权限",
+			o.appID, channelID, errorCode(err), errs.Error(err).Trace(), truncateLog(err.Error(), 600))
 	}
-	return resp.Result().(*dto.Message), nil
+	return result, err
 }
 
 // PostFormFileReaderImage 频道图片表单上传（Reader）。
@@ -253,10 +260,12 @@ func (o *openAPI) PostFormFileReaderImage(
 		SetFormData(m).
 		SetFileReader("file_image", filename, r).
 		Post(o.getURL(messagesURI))
+	result, err := decodeMessage(resp, err)
 	if err != nil {
-		return nil, err
+		log.Errorf("[QQBot][openapi] 频道图片上传失败 app=%s channel=%s code=%d trace=%s err=%s；请检查图片大小/格式和机器人权限",
+			o.appID, channelID, errorCode(err), errs.Error(err).Trace(), truncateLog(err.Error(), 600))
 	}
-	return resp.Result().(*dto.Message), nil
+	return result, err
 }
 
 // PostStreamMessage 流式发送单聊消息。
@@ -271,7 +280,12 @@ func (o *openAPI) PostStreamMessage(
 		SetPathParam("user_openid", userOpenID).
 		SetBody(msg).
 		Post(o.getURL(streamMessagesURI))
-	return decodeStreamMessage(resp, err)
+	result, err := decodeStreamMessage(resp, err)
+	if err != nil {
+		log.Errorf("[QQBot][openapi] 流式消息发送失败 app=%s user=%s code=%d trace=%s err=%s；请检查 stream_msg_id/index/state 和消息内容",
+			o.appID, userOpenID, errorCode(err), errs.Error(err).Trace(), truncateLog(err.Error(), 600))
+	}
+	return result, err
 }
 
 // PostMessageMultipart 发送频道消息（multipart/form-data，可带 file_image）。
@@ -318,7 +332,12 @@ func (o *openAPI) PostMessageMultipart(
 		req.SetFileReader("file_image", "filename.jpg", bytes.NewReader(fileImageData))
 	}
 	resp, err := baseRequest(ctx, req, http.MethodPost, o.getURL(messagesURI), opt...)
-	return decodeMessage(resp, err)
+	result, err := decodeMessage(resp, err)
+	if err != nil {
+		log.Errorf("[QQBot][openapi] 频道 multipart 消息发送失败 app=%s channel=%s code=%d trace=%s err=%s；请检查 file_image/message_reference 和机器人权限",
+			o.appID, channelID, errorCode(err), errs.Error(err).Trace(), truncateLog(err.Error(), 600))
+	}
+	return result, err
 }
 
 var msgSeqCounter atomic.Uint32
@@ -403,8 +422,9 @@ func prepareSendMessage(msg dto.APIMessage) dto.APIMessage {
 //   - 40054005 消息去重 -> 换一个 msg_seq 重试
 //   - 被动回复 msg_id/event_id 过期 -> 可选回退为主动消息
 //   - 空响应/5xx -> 可选重试一次
-func sendMessageWithFallback(
+func (o *openAPI) sendMessageWithFallback(
 	ctx context.Context,
+	target string,
 	msg dto.APIMessage,
 	opts *options.Options,
 	send func(dto.APIMessage) (*dto.Message, error),
@@ -412,6 +432,8 @@ func sendMessageWithFallback(
 	if opts == nil {
 		opts = &options.Options{}
 	}
+	msgID, eventID := messageIDs(msg)
+	actions := make([]string, 0, 4)
 
 	res, err := send(msg)
 	if err == nil {
@@ -419,7 +441,9 @@ func sendMessageWithFallback(
 	}
 
 	if plain, ok := withoutMarkdown(msg); ok && isMarkdownError(err) {
-		log.Warnf("[OPENAPI] markdown 发送被拒绝，降级为纯文本重试: %v", err)
+		log.Warnf("[QQBot][openapi] markdown 被拒绝，已自动降级为纯文本 app=%s target=%s msg_id=%s event_id=%s err=%s；若持续出现请检查机器人 markdown 权限或消息内容",
+			o.appID, target, msgID, eventID, truncateLog(err.Error(), 600))
+		actions = append(actions, "markdown->text")
 		res, err = send(plain)
 		if err == nil {
 			return res, nil
@@ -428,7 +452,9 @@ func sendMessageWithFallback(
 	}
 
 	if retry, ok := withFreshMsgSeq(msg); ok && isMsgSeqDuplicate(err) {
-		log.Warnf("[OPENAPI] 消息被去重，使用新的 msg_seq 重试: %v", err)
+		log.Warnf("[QQBot][openapi] 消息被去重，已自动更换 msg_seq 重试 app=%s target=%s msg_id=%s event_id=%s err=%s；若频繁出现请检查调用方是否复用 MsgSeq",
+			o.appID, target, msgID, eventID, truncateLog(err.Error(), 600))
+		actions = append(actions, "new-msg-seq")
 		res, err = send(retry)
 		if err == nil {
 			return res, nil
@@ -438,7 +464,9 @@ func sendMessageWithFallback(
 
 	if opts.ProactiveFallback {
 		if proactive, ok := withoutPassiveID(msg); ok && isPassiveReplyError(err) {
-			log.Warnf("[OPENAPI] 被动回复失败，回退为主动消息重试: %v", err)
+			log.Warnf("[QQBot][openapi] 被动回复失败，已回退为主动消息 app=%s target=%s msg_id=%s event_id=%s err=%s；这会占用主动消息配额，请确认调用方限流",
+				o.appID, target, msgID, eventID, truncateLog(err.Error(), 600))
+			actions = append(actions, "proactive")
 			res, err = send(proactive)
 			if err == nil {
 				return res, nil
@@ -451,14 +479,50 @@ func sendMessageWithFallback(
 		if sleepErr := sleepContext(ctx, 200*time.Millisecond); sleepErr != nil {
 			return nil, sleepErr
 		}
-		log.Warnf("[OPENAPI] 发送遇到可重试错误，重试一次: %v", err)
+		log.Warnf("[QQBot][openapi] 发送遇到临时错误或空响应，已重试一次 app=%s target=%s msg_id=%s event_id=%s err=%s；若频繁出现请检查网络或平台状态",
+			o.appID, target, msgID, eventID, truncateLog(err.Error(), 600))
+		actions = append(actions, "retry")
 		res, err = send(msg)
 		if err == nil {
 			return res, nil
 		}
 	}
 
+	actionText := "无自动降级"
+	if len(actions) > 0 {
+		actionText = strings.Join(actions, ",")
+	}
+	hint := "请检查机器人权限、msg_id/event_id 是否过期、消息内容、主动消息配额或平台状态"
+	if isPassiveReplyError(err) && !opts.ProactiveFallback {
+		hint += "；如允许主动消息，可启用 options.WithProactiveFallback（注意主动消息配额）"
+	}
+	if isMarkdownError(err) {
+		hint += "；如机器人没有 markdown 权限，请关闭 markdown 或检查消息内容"
+	}
+	if isTransientSendError(err) && !opts.RetryOnTransient {
+		hint += "；如平台响应不稳定，可启用 options.WithRetryOnTransient（注意重复发送风险）"
+	}
+	log.Errorf("[QQBot][openapi] 消息发送最终失败 app=%s target=%s msg_id=%s event_id=%s code=%d trace=%s actions=%s err=%s；%s",
+		o.appID, target, msgID, eventID, errorCode(err), errs.Error(err).Trace(), actionText, truncateLog(err.Error(), 800), hint)
 	return nil, err
+}
+
+func messageIDs(msg dto.APIMessage) (msgID, eventID string) {
+	switch m := msg.(type) {
+	case *dto.MessageToCreate:
+		if m != nil {
+			return m.MsgID, m.EventID
+		}
+	case dto.MessageToCreate:
+		return m.MsgID, m.EventID
+	case *dto.RichMediaMessage:
+		if m != nil {
+			return "", m.EventID
+		}
+	case dto.RichMediaMessage:
+		return "", m.EventID
+	}
+	return "", ""
 }
 
 func withoutMarkdown(msg dto.APIMessage) (dto.APIMessage, bool) {

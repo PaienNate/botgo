@@ -10,7 +10,7 @@ import (
 
 // SetLogger 设置 logger，需要实现 sdk 的 log.Logger 接口
 func SetLogger(logger log.Logger) {
-	log.DefaultLogger = logger //nolint:reassign // 全局 logger 注入
+	log.SetLogger(logger)
 }
 
 // SetSessionManager 注册自己实现的 session manager

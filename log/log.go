@@ -4,6 +4,14 @@ package log
 // DefaultLogger 默认logger
 var DefaultLogger = Logger(new(consoleLogger))
 
+// SetLogger 替换全局 logger。传入 nil 时忽略，避免误关闭全部日志。
+func SetLogger(logger Logger) {
+	if logger == nil {
+		return
+	}
+	DefaultLogger = logger //nolint:reassign // 全局 logger 注入点
+}
+
 // Debug log.Debug
 func Debug(v ...interface{}) {
 	DefaultLogger.Debug(v...)

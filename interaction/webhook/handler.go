@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"runtime/debug"
 
 	"github.com/sealdice/botgo/dto"
 	"github.com/sealdice/botgo/event"
@@ -87,12 +88,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			secret = h.opts.Credentials.AppSecret
 		}
 		if secret == "" {
+			log.Errorf("[QQBot][webhook] 缺少 AppSecret，无法验证回调 app=%s", h.appID())
 			writeError(w, http.StatusInternalServerError, "missing app secret")
 			return
 		}
 		pass, err := signature.Verify(secret, r.Header, body)
 		if err != nil || !pass {
-			log.Errorf("webhook signature verify failed: %v", err)
+			log.Errorf("[QQBot][webhook] 签名校验失败 app=%s: %v；请检查 AppSecret 与回调地址配置", h.appID(), err)
 			writeError(w, http.StatusUnauthorized, "invalid signature")
 			return
 		}
@@ -124,6 +126,7 @@ func (h *Handler) handleValidation(w http.ResponseWriter, r *http.Request, paylo
 		secret = h.opts.Credentials.AppSecret
 	}
 	if secret == "" {
+		log.Errorf("[QQBot][webhook] 缺少 AppSecret，无法处理回调校验 app=%s", h.appID())
 		writeError(w, http.StatusInternalServerError, "missing app secret")
 		return
 	}
@@ -159,7 +162,7 @@ func (h *Handler) handleDispatch(w http.ResponseWriter, payload *dto.WSPayload) 
 		writeJSON(w, http.StatusOK, GenDispatchACK(true))
 		go func() {
 			if err := dispatch(payload); err != nil {
-				h.reportError(err)
+				h.reportError(err, payload)
 				dedup.UnmarkAll(h.opts.Deduper, dedupKeys)
 			}
 		}()
@@ -167,7 +170,7 @@ func (h *Handler) handleDispatch(w http.ResponseWriter, payload *dto.WSPayload) 
 	}
 
 	if err := dispatch(payload); err != nil {
-		h.reportError(err)
+		h.reportError(err, payload)
 		dedup.UnmarkAll(h.opts.Deduper, dedupKeys)
 		writeJSON(w, http.StatusOK, GenDispatchACK(false))
 		return
@@ -175,18 +178,31 @@ func (h *Handler) handleDispatch(w http.ResponseWriter, payload *dto.WSPayload) 
 	writeJSON(w, http.StatusOK, GenDispatchACK(true))
 }
 
-func (h *Handler) reportError(err error) {
+func (h *Handler) appID() string {
+	if h.opts.Credentials != nil {
+		return h.opts.Credentials.AppID
+	}
+	return ""
+}
+
+func (h *Handler) reportError(err error, payload *dto.WSPayload) {
 	if h.opts.ErrorHandler != nil {
 		h.opts.ErrorHandler(err)
 		return
 	}
-	log.Errorf("webhook dispatch failed: %v", err)
+	eventID, eventType := "", dto.EventType("")
+	if payload != nil {
+		eventID = payload.EventID
+		eventType = payload.Type
+	}
+	log.Errorf("[QQBot][webhook] 事件处理失败 app=%s event_id=%s type=%s err=%v；若持续出现请检查业务 handler 返回值和日志",
+		h.appID(), eventID, eventType, err)
 }
 
 func dispatch(payload *dto.WSPayload) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			err = fmt.Errorf("panic: %v", r)
+			err = fmt.Errorf("panic: %v\n%s", r, debug.Stack())
 		}
 	}()
 	return event.ParseAndHandle(payload)

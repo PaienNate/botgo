@@ -172,6 +172,13 @@ func (w *QQBotTokenSource) loadValidToken() (*oauth2.Token, bool) {
 	return token, true
 }
 
+func (w *QQBotTokenSource) appID() string {
+	if w == nil || w.credentials == nil {
+		return ""
+	}
+	return w.credentials.AppID
+}
+
 func (w *QQBotTokenSource) getNewToken() (*oauth2.Token, error) {
 	retrieveReq := qqBotTokenReq{
 		AppID:        w.credentials.AppID,
@@ -188,7 +195,7 @@ func (w *QQBotTokenSource) getNewToken() (*oauth2.Token, error) {
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, getTokenURL(), payload)
 	if err != nil {
-		log.Errorf("init http req failed:%v", err)
+		log.Errorf("[QQBot][token] 初始化 token 请求失败 app=%s: %v", w.appID(), err)
 		return nil, err
 	}
 	req.Header.Add("Content-Type", "application/json")
@@ -197,7 +204,7 @@ func (w *QQBotTokenSource) getNewToken() (*oauth2.Token, error) {
 	}
 	rsp, err := client.Do(req)
 	if err != nil {
-		log.Errorf("retrieve token failed:%v", err)
+		log.Errorf("[QQBot][token] 请求 access_token 失败 app=%s: %v；请检查网络和 token 地址", w.appID(), err)
 		return nil, err
 	}
 	defer func() {
@@ -206,27 +213,30 @@ func (w *QQBotTokenSource) getNewToken() (*oauth2.Token, error) {
 	rspTraceID := rsp.Header.Get(constant.HeaderTraceID)
 	body, err := io.ReadAll(io.LimitReader(rsp.Body, tokenResponseLimit))
 	if err != nil {
-		log.Errorf("read rsp failed:%v", err)
+		log.Errorf("[QQBot][token] 读取 token 响应失败 app=%s: %v", w.appID(), err)
 		return nil, err
 	}
 	if rsp.StatusCode != http.StatusOK {
-		log.Errorf("retrieve token http status:%d traceID:%s", rsp.StatusCode, rspTraceID)
+		log.Errorf("[QQBot][token] token 接口返回异常状态 app=%s status=%d trace=%s", w.appID(), rsp.StatusCode, rspTraceID)
 		return nil, fmt.Errorf("retrieve token http status %d, traceID %s", rsp.StatusCode, rspTraceID)
 	}
 	log.Debugf("access token response received, size=%d traceID=%s", len(body), rspTraceID)
 	retrieveRsp := &qqBotTokenRsp{}
 	if err = json.Unmarshal(body, retrieveRsp); err != nil {
-		log.Errorf("unmarshal rsp failed:%v traceID:%v", err, rspTraceID)
+		log.Errorf("[QQBot][token] 解析 token 响应失败 app=%s trace=%s: %v", w.appID(), rspTraceID, err)
 		return nil, err
 	}
 	if retrieveRsp.Code != 0 {
-		log.Errorf("query accessToken err:%v.%v traceID:%v", retrieveRsp.Code, retrieveRsp.Message, rspTraceID)
+		log.Errorf("[QQBot][token] 获取 access_token 失败 app=%s code=%d trace=%s message=%s；请检查 AppID/AppSecret 和机器人状态",
+			w.appID(), retrieveRsp.Code, rspTraceID, retrieveRsp.Message)
 		return nil, fmt.Errorf("%v.%v, traceID: %s", retrieveRsp.Code, retrieveRsp.Message, rspTraceID)
 	}
 	if retrieveRsp.AccessToken == "" {
+		log.Errorf("[QQBot][token] token 响应缺少 access_token app=%s trace=%s", w.appID(), rspTraceID)
 		return nil, fmt.Errorf("empty access_token, traceID: %s", rspTraceID)
 	}
 	if retrieveRsp.ExpiresIn <= 0 {
+		log.Errorf("[QQBot][token] token 响应 expires_in 无效 app=%s value=%d trace=%s", w.appID(), retrieveRsp.ExpiresIn, rspTraceID)
 		return nil, fmt.Errorf("invalid expires_in: %d, traceID: %s", retrieveRsp.ExpiresIn, rspTraceID)
 	}
 	expiry := time.Now().Add(time.Duration(retrieveRsp.ExpiresIn) * time.Second)
@@ -274,6 +284,10 @@ func StartRefreshAccessToken(ctx context.Context, tokenSource oauth2.TokenSource
 	if err != nil {
 		return err
 	}
+	appID := ""
+	if source, ok := tokenSource.(interface{ GetAppID() string }); ok {
+		appID = source.GetAppID()
+	}
 	go func() {
 		for {
 			ttlSeconds := tk.ExpiresIn
@@ -288,7 +302,7 @@ func StartRefreshAccessToken(ctx context.Context, tokenSource oauth2.TokenSource
 				timer.Stop()
 			case <-ctx.Done():
 				timer.Stop()
-				log.Warnf("recv ctx:%v exit refresh token", ctx.Err())
+				log.Warnf("[QQBot][token] 刷新协程退出 app=%s: %v", appID, ctx.Err())
 				return
 			}
 
@@ -307,18 +321,18 @@ func StartRefreshAccessToken(ctx context.Context, tokenSource oauth2.TokenSource
 				if h := currentRefreshErrorHandler(); h != nil {
 					h(err)
 				}
-				log.Errorf("refresh access token failed: %v, retry after %v", err, d)
+				log.Errorf("[QQBot][token] 刷新 access_token 失败 app=%s: %v；%v 后重试", appID, err, d)
 			})
 			if err != nil {
 				// WithContext 在 ctx 取消时返回；其他情况 MaxElapsedTime 为 0，不会发生。
-				log.Warnf("stop refresh access token: %v", err)
+				log.Warnf("[QQBot][token] 停止刷新 access_token app=%s: %v", appID, err)
 				return
 			}
 			if tk == nil {
-				log.Errorf("access token refreshed but token is nil")
+				log.Errorf("[QQBot][token] access_token 刷新后为空 app=%s", appID)
 				continue
 			}
-			log.Infof("access token refreshed, expires in %d seconds", tk.ExpiresIn)
+			log.Infof("[QQBot][token] access_token 已刷新 app=%s expires_in=%d", appID, tk.ExpiresIn)
 		}
 	}()
 	return nil

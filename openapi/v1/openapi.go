@@ -107,7 +107,7 @@ func (o *openAPI) setupClient(appID string) {
 			func(c *resty.Client, r *resty.Request) error {
 				tk, err := o.tokenSource.Token()
 				if err != nil {
-					log.Errorf("[setupClient] retrieve token failed:%s", err)
+					log.Errorf("[QQBot][openapi] 获取 access_token 失败 app=%s: %v；请检查 AppID/AppSecret、网络和 token 接口状态", o.appID, err)
 					return err
 				}
 				// 只设置到 request 上，不能修改 client：并发请求会互相覆盖，存在 data race。
@@ -133,12 +133,19 @@ func (o *openAPI) setupClient(appID string) {
 				o.lastTraceID = traceID
 				// 非成功含义的状态码，需要返回 error 供调用方识别
 				if !openapi.IsSuccessStatus(resp.StatusCode()) {
+					code, message, ok := parseBusinessError(resp.Body())
+					if !ok {
+						code = resp.StatusCode()
+						message = string(resp.Body())
+					}
+					o.logAPIError(resp, code, message, traceID)
 					o.handleError(resp)
 					return errs.New(resp.StatusCode(), string(resp.Body()), traceID)
 				}
 				// 官方部分接口会以 HTTP 200 + err_code/code 返回业务错误。
 				// 如果不解析，调用方会把失败当成功，媒体上传、被动回复过期等都会静默丢消息。
 				if code, message, ok := parseBusinessError(resp.Body()); ok {
+					o.logAPIError(resp, code, message, traceID)
 					o.handleError(resp)
 					return errs.New(code, message, traceID)
 				}
@@ -160,6 +167,40 @@ func (o *openAPI) GetAppID() string {
 	return o.appID
 }
 
+// logAPIError 输出一条能直接定位问题的 Warn 日志。
+// 注意：不要把完整请求体写进错误日志，消息内容可能包含用户隐私。
+func (o *openAPI) logAPIError(resp *resty.Response, code int, message, traceID string) {
+	method, path := "", ""
+	status := 0
+	if resp != nil {
+		status = resp.StatusCode()
+		if resp.Request != nil {
+			method = resp.Request.Method
+			if resp.Request.RawRequest != nil && resp.Request.RawRequest.URL != nil {
+				path = resp.Request.RawRequest.URL.Path
+			}
+			if path == "" {
+				path = resp.Request.URL
+			}
+		}
+	}
+	message = truncateLog(message, 300)
+	if code == errs.APICodeTokenExpireOrNotExist {
+		log.Warnf("[QQBot][openapi] access_token 过期或不存在，正在强制刷新并重试 app=%s method=%s path=%s trace=%s",
+			o.appID, method, path, traceID)
+		return
+	}
+	log.Warnf("[QQBot][openapi] 请求返回错误 app=%s method=%s path=%s status=%d code=%d trace=%s message=%s；请检查机器人权限、参数或平台状态",
+		o.appID, method, path, status, code, traceID, message)
+}
+
+func truncateLog(s string, limit int) string {
+	if limit <= 0 || len(s) <= limit {
+		return s
+	}
+	return strings.ToValidUTF8(s[:limit], "") + "...(truncated)"
+}
+
 // handleError 处理openapi调用失败的情况
 func (o *openAPI) handleError(resp *resty.Response) {
 	code, _, ok := parseBusinessError(resp.Body())
@@ -167,7 +208,6 @@ func (o *openAPI) handleError(resp *resty.Response) {
 		return
 	}
 	if code == errs.APICodeTokenExpireOrNotExist {
-		log.Errorf("token expire or not exist, force refresh token")
 		forceRefreshToken(o.tokenSource)
 	}
 }
@@ -242,9 +282,44 @@ func respInfo(resp *resty.Response) string {
 		resp.Header().Get(constant.HeaderTraceID),
 		resp.Status(),
 		resp.Time(),
-		string(bodyJSON),
-		string(resp.Body()),
+		redactLogBody(bodyJSON),
+		redactLogBody(resp.Body()),
 	)
+}
+
+// redactLogBody 对请求/响应 JSON 做最小化脱敏并截断，避免把消息正文、
+// 媒体 base64、token、签名等内容写进 Info 日志。
+func redactLogBody(raw []byte) string {
+	var v interface{}
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return truncateLog(string(raw), 2048)
+	}
+	redactLogValue(v)
+	redacted, err := json.Marshal(v)
+	if err != nil {
+		return truncateLog(string(raw), 2048)
+	}
+	return truncateLog(string(redacted), 2048)
+}
+
+func redactLogValue(v interface{}) {
+	switch value := v.(type) {
+	case map[string]interface{}:
+		for key, child := range value {
+			switch strings.ToLower(key) {
+			case "content", "markdown", "file_data", "file_info",
+				"access_token", "token", "secret", "clientsecret",
+				"plain_token", "signature":
+				value[key] = "[REDACTED]"
+			default:
+				redactLogValue(child)
+			}
+		}
+	case []interface{}:
+		for _, child := range value {
+			redactLogValue(child)
+		}
+	}
 }
 func createTransport(localAddr net.Addr, idleConns int) *http.Transport {
 	dialer := &net.Dialer{
