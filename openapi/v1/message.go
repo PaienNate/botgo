@@ -4,15 +4,20 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/go-resty/resty/v2"
 	"github.com/tidwall/gjson"
 
 	"github.com/sealdice/botgo/dto"
 	"github.com/sealdice/botgo/errs"
+	"github.com/sealdice/botgo/log"
 	"github.com/sealdice/botgo/openapi/options"
 )
 
@@ -64,16 +69,20 @@ func (o *openAPI) Messages(ctx context.Context, channelID string, pager *dto.Mes
 // PostMessage 发消息
 func (o *openAPI) PostMessage(ctx context.Context, channelID string, msg *dto.MessageToCreate,
 	opt ...options.Option) (*dto.Message, error) {
-	reqCMD := o.request(ctx).
-		SetResult(dto.Message{}).
-		SetPathParam("channel_id", channelID).
-		SetBody(msg)
-
-	resp, err := baseRequest(ctx, reqCMD, http.MethodPost, o.getURL(messagesURI), opt...)
-	if err != nil {
-		return nil, err
+	if msg == nil {
+		return nil, errs.ErrNilMessage
 	}
-	return resp.Result().(*dto.Message), nil
+	msg = prepareChannelMessage(msg)
+	opts := getOptions(ctx, opt...)
+	send := func(m dto.APIMessage) (*dto.Message, error) {
+		reqCMD := o.request(ctx).
+			SetResult(dto.Message{}).
+			SetPathParam("channel_id", channelID).
+			SetBody(m)
+		resp, err := baseRequest(ctx, reqCMD, http.MethodPost, o.getURL(messagesURI), opt...)
+		return decodeMessage(resp, err)
+	}
+	return sendMessageWithFallback(ctx, msg, opts, send)
 }
 
 // PatchMessage 编辑消息
@@ -159,16 +168,20 @@ func getGroupURIBySendType(msgType dto.SendType) uri {
 // PostGroupMessage 回复群消息
 func (o *openAPI) PostGroupMessage(ctx context.Context, groupID string, msg dto.APIMessage,
 	opt ...options.Option) (*dto.Message, error) {
-	reqCMD := o.request(ctx).
-		SetResult(dto.Message{}).
-		SetPathParam("group_id", groupID).
-		SetBody(msg)
-
-	resp, err := baseRequest(ctx, reqCMD, http.MethodPost, o.getURL(getGroupURIBySendType(msg.GetSendType())), opt...)
-	if err != nil {
+	if err := validateAPIMessage(msg); err != nil {
 		return nil, err
 	}
-	return resp.Result().(*dto.Message), nil
+	msg = prepareSendMessage(msg)
+	opts := getOptions(ctx, opt...)
+	send := func(m dto.APIMessage) (*dto.Message, error) {
+		reqCMD := o.request(ctx).
+			SetResult(dto.Message{}).
+			SetPathParam("group_id", groupID).
+			SetBody(m)
+		resp, err := baseRequest(ctx, reqCMD, http.MethodPost, o.getURL(getGroupURIBySendType(m.GetSendType())), opt...)
+		return decodeMessage(resp, err)
+	}
+	return sendMessageWithFallback(ctx, msg, opts, send)
 }
 
 func getC2CURIBySendType(msgType dto.SendType) uri {
@@ -183,31 +196,35 @@ func getC2CURIBySendType(msgType dto.SendType) uri {
 // PostC2CMessage 回复C2C消息
 func (o *openAPI) PostC2CMessage(ctx context.Context, userID string, msg dto.APIMessage,
 	opt ...options.Option) (*dto.Message, error) {
-	reqCMD := o.request(ctx).
-		SetResult(dto.Message{}).
-		SetPathParam("user_id", userID).
-		SetBody(msg)
-
-	resp, err := baseRequest(ctx, reqCMD, http.MethodPost, o.getURL(getC2CURIBySendType(msg.GetSendType())), opt...)
-	if err != nil {
+	if err := validateAPIMessage(msg); err != nil {
 		return nil, err
 	}
-	return resp.Result().(*dto.Message), nil
+	msg = prepareSendMessage(msg)
+	opts := getOptions(ctx, opt...)
+	send := func(m dto.APIMessage) (*dto.Message, error) {
+		reqCMD := o.request(ctx).
+			SetResult(dto.Message{}).
+			SetPathParam("user_id", userID).
+			SetBody(m)
+		resp, err := baseRequest(ctx, reqCMD, http.MethodPost, o.getURL(getC2CURIBySendType(m.GetSendType())), opt...)
+		return decodeMessage(resp, err)
+	}
+	return sendMessageWithFallback(ctx, msg, opts, send)
 }
 
 // PostGroupFile 上传群文件（富媒体）
 func (o *openAPI) PostGroupFile(ctx context.Context, groupID string,
 	msg *dto.MessageMediaToCreate) (*dto.Media, error) {
+	if msg == nil {
+		return nil, errs.ErrNilMessage
+	}
 	reqCMD := o.request(ctx).
 		SetResult(dto.Media{}).
 		SetPathParam("group_id", groupID).
 		SetBody(msg)
 
 	resp, err := reqCMD.Execute(http.MethodPost, o.getURL(groupRichMediaURI))
-	if err != nil {
-		return nil, err
-	}
-	return resp.Result().(*dto.Media), nil
+	return decodeMedia(resp, err)
 }
 
 // PostFormFileImage 频道图片表单上传。
@@ -246,15 +263,15 @@ func (o *openAPI) PostFormFileReaderImage(
 func (o *openAPI) PostStreamMessage(
 	ctx context.Context, userOpenID string, msg *dto.StreamMessageToCreate,
 ) (*dto.StreamMessageResp, error) {
+	if msg == nil {
+		return nil, errs.ErrNilMessage
+	}
 	resp, err := o.request(ctx).
 		SetResult(dto.StreamMessageResp{}).
 		SetPathParam("user_openid", userOpenID).
 		SetBody(msg).
 		Post(o.getURL(streamMessagesURI))
-	if err != nil {
-		return nil, err
-	}
-	return resp.Result().(*dto.StreamMessageResp), nil
+	return decodeStreamMessage(resp, err)
 }
 
 // PostMessageMultipart 发送频道消息（multipart/form-data，可带 file_image）。
@@ -285,7 +302,8 @@ func (o *openAPI) PostMessageMultipart(
 	if msg.EventID != "" {
 		form["event_id"] = msg.EventID
 	}
-	if msg.MessageReference != nil {
+	// 官方/botpy 约束：file_image 与 message_reference 不能同时传入，优先级为 file_image。
+	if msg.MessageReference != nil && len(fileImageData) == 0 {
 		form["message_reference"] = toJSON(msg.MessageReference)
 	}
 	if msg.Markdown != nil {
@@ -300,10 +318,410 @@ func (o *openAPI) PostMessageMultipart(
 		req.SetFileReader("file_image", "filename.jpg", bytes.NewReader(fileImageData))
 	}
 	resp, err := baseRequest(ctx, req, http.MethodPost, o.getURL(messagesURI), opt...)
+	return decodeMessage(resp, err)
+}
+
+var msgSeqCounter atomic.Uint32
+
+func init() {
+	// 用时间做种子，避免进程重启后从 1 开始，与 5 分钟内旧消息的 msg_seq 冲突。
+	msgSeqCounter.Store(uint32(time.Now().UnixNano()%1_000_000_000) + 1)
+}
+
+func nextMsgSeq() uint32 {
+	for {
+		if seq := msgSeqCounter.Add(1); seq != 0 {
+			return seq
+		}
+	}
+}
+
+func validateAPIMessage(msg dto.APIMessage) error {
+	switch m := msg.(type) {
+	case nil:
+		return errs.ErrNilMessage
+	case *dto.MessageToCreate:
+		if m == nil {
+			return errs.ErrNilMessage
+		}
+	case *dto.RichMediaMessage:
+		if m == nil {
+			return errs.ErrNilMessage
+		}
+	}
+	return nil
+}
+
+// prepareChannelMessage 清理频道/私信接口不接受的 v2 字段。
+// msg_type 仅用于群聊/单聊 v2 接口，频道消息接口不接受该字段。
+func prepareChannelMessage(msg *dto.MessageToCreate) *dto.MessageToCreate {
+	if msg == nil || msg.MsgType == 0 {
+		return msg
+	}
+	clone := *msg
+	clone.MsgType = dto.TextMsg
+	return &clone
+}
+
+// prepareSendMessage 为被动回复补充 msg_seq。
+// 官方要求同一 msg_id/event_id 的多次回复必须使用不同的 msg_seq，否则返回 40054005。
+func prepareSendMessage(msg dto.APIMessage) dto.APIMessage {
+	switch m := msg.(type) {
+	case *dto.MessageToCreate:
+		if m == nil || (m.MsgID == "" && m.EventID == "") || m.MsgSeq != 0 {
+			return msg
+		}
+		clone := *m
+		clone.MsgSeq = nextMsgSeq()
+		return &clone
+	case dto.MessageToCreate:
+		if (m.MsgID == "" && m.EventID == "") || m.MsgSeq != 0 {
+			return msg
+		}
+		m.MsgSeq = nextMsgSeq()
+		return m
+	case *dto.RichMediaMessage:
+		if m == nil || m.EventID == "" || m.MsgSeq != 0 {
+			return msg
+		}
+		clone := *m
+		clone.MsgSeq = int64(nextMsgSeq())
+		return &clone
+	case dto.RichMediaMessage:
+		if m.EventID == "" || m.MsgSeq != 0 {
+			return msg
+		}
+		m.MsgSeq = int64(nextMsgSeq())
+		return m
+	default:
+		return msg
+	}
+}
+
+// sendMessageWithFallback 处理官方常见的“可恢复”发送失败：
+//   - markdown 权限/格式错误 -> 降级为纯文本
+//   - 40054005 消息去重 -> 换一个 msg_seq 重试
+//   - 被动回复 msg_id/event_id 过期 -> 可选回退为主动消息
+//   - 空响应/5xx -> 可选重试一次
+func sendMessageWithFallback(
+	ctx context.Context,
+	msg dto.APIMessage,
+	opts *options.Options,
+	send func(dto.APIMessage) (*dto.Message, error),
+) (*dto.Message, error) {
+	if opts == nil {
+		opts = &options.Options{}
+	}
+
+	res, err := send(msg)
+	if err == nil {
+		return res, nil
+	}
+
+	if plain, ok := withoutMarkdown(msg); ok && isMarkdownError(err) {
+		log.Warnf("[OPENAPI] markdown 发送被拒绝，降级为纯文本重试: %v", err)
+		res, err = send(plain)
+		if err == nil {
+			return res, nil
+		}
+		msg = plain
+	}
+
+	if retry, ok := withFreshMsgSeq(msg); ok && isMsgSeqDuplicate(err) {
+		log.Warnf("[OPENAPI] 消息被去重，使用新的 msg_seq 重试: %v", err)
+		res, err = send(retry)
+		if err == nil {
+			return res, nil
+		}
+		msg = retry
+	}
+
+	if opts.ProactiveFallback {
+		if proactive, ok := withoutPassiveID(msg); ok && isPassiveReplyError(err) {
+			log.Warnf("[OPENAPI] 被动回复失败，回退为主动消息重试: %v", err)
+			res, err = send(proactive)
+			if err == nil {
+				return res, nil
+			}
+			msg = proactive
+		}
+	}
+
+	if opts.RetryOnTransient && isTransientSendError(err) {
+		if sleepErr := sleepContext(ctx, 200*time.Millisecond); sleepErr != nil {
+			return nil, sleepErr
+		}
+		log.Warnf("[OPENAPI] 发送遇到可重试错误，重试一次: %v", err)
+		res, err = send(msg)
+		if err == nil {
+			return res, nil
+		}
+	}
+
+	return nil, err
+}
+
+func withoutMarkdown(msg dto.APIMessage) (dto.APIMessage, bool) {
+	switch m := msg.(type) {
+	case *dto.MessageToCreate:
+		if m == nil || m.Markdown == nil || m.Media != nil {
+			return nil, false
+		}
+		content := m.Markdown.Content
+		if strings.TrimSpace(content) == "" {
+			content = m.Content
+		}
+		if strings.TrimSpace(content) == "" {
+			return nil, false
+		}
+		clone := *m
+		clone.Markdown = nil
+		clone.Content = content
+		if clone.MsgType == dto.MarkdownMsg {
+			clone.MsgType = dto.TextMsg
+		}
+		return &clone, true
+	case dto.MessageToCreate:
+		if m.Markdown == nil || m.Media != nil {
+			return nil, false
+		}
+		content := m.Markdown.Content
+		if strings.TrimSpace(content) == "" {
+			content = m.Content
+		}
+		if strings.TrimSpace(content) == "" {
+			return nil, false
+		}
+		m.Markdown = nil
+		m.Content = content
+		if m.MsgType == dto.MarkdownMsg {
+			m.MsgType = dto.TextMsg
+		}
+		return m, true
+	default:
+		return nil, false
+	}
+}
+
+func withoutPassiveID(msg dto.APIMessage) (dto.APIMessage, bool) {
+	switch m := msg.(type) {
+	case *dto.MessageToCreate:
+		if m == nil || (m.MsgID == "" && m.EventID == "") {
+			return nil, false
+		}
+		clone := *m
+		clone.MsgID = ""
+		clone.EventID = ""
+		clone.MsgSeq = 0
+		return &clone, true
+	case dto.MessageToCreate:
+		if m.MsgID == "" && m.EventID == "" {
+			return nil, false
+		}
+		m.MsgID = ""
+		m.EventID = ""
+		m.MsgSeq = 0
+		return m, true
+	case *dto.RichMediaMessage:
+		if m == nil || m.EventID == "" {
+			return nil, false
+		}
+		clone := *m
+		clone.EventID = ""
+		clone.MsgSeq = 0
+		return &clone, true
+	case dto.RichMediaMessage:
+		if m.EventID == "" {
+			return nil, false
+		}
+		m.EventID = ""
+		m.MsgSeq = 0
+		return m, true
+	default:
+		return nil, false
+	}
+}
+
+func withFreshMsgSeq(msg dto.APIMessage) (dto.APIMessage, bool) {
+	switch m := msg.(type) {
+	case *dto.MessageToCreate:
+		if m == nil || (m.MsgID == "" && m.EventID == "") {
+			return nil, false
+		}
+		clone := *m
+		clone.MsgSeq = nextMsgSeq()
+		return &clone, true
+	case dto.MessageToCreate:
+		if m.MsgID == "" && m.EventID == "" {
+			return nil, false
+		}
+		m.MsgSeq = nextMsgSeq()
+		return m, true
+	case *dto.RichMediaMessage:
+		if m == nil || m.EventID == "" {
+			return nil, false
+		}
+		clone := *m
+		clone.MsgSeq = int64(nextMsgSeq())
+		return &clone, true
+	case dto.RichMediaMessage:
+		if m.EventID == "" {
+			return nil, false
+		}
+		m.MsgSeq = int64(nextMsgSeq())
+		return m, true
+	default:
+		return nil, false
+	}
+}
+
+func isMarkdownError(err error) bool {
+	switch errorCode(err) {
+	case errs.APICodeMarkdownNotAllowed,
+		errs.APICodeMarkdownInvalid,
+		errs.APICodeMarkdownParamInvalid,
+		errs.APICodeMarkdownNewline,
+		errs.APICodeMarkdownSyntaxInParam,
+		errs.APICodeMarkdownNoTemplate,
+		errs.APICodeMarkdownParamError,
+		errs.APICodeLegacyMarkdownNoPerm,
+		50037, 50041, 50042, 50054, 50055, 50057:
+		return true
+	}
+	text := errorText(err)
+	return strings.Contains(text, "markdown") &&
+		(strings.Contains(text, "不允许") ||
+			strings.Contains(text, "not allowed") ||
+			strings.Contains(text, "无权限") ||
+			strings.Contains(text, "invalid") ||
+			strings.Contains(text, "参数") ||
+			strings.Contains(text, "content"))
+}
+
+func isMsgSeqDuplicate(err error) bool {
+	if errorCode(err) == errs.APICodeMessageDedup {
+		return true
+	}
+	text := errorText(err)
+	return strings.Contains(text, "msgseq") ||
+		strings.Contains(text, "msg_seq") ||
+		strings.Contains(text, "消息被去重") ||
+		strings.Contains(text, "dedup")
+}
+
+func isPassiveReplyError(err error) bool {
+	switch errorCode(err) {
+	case errs.APICodeMessageIDExpired,
+		errs.APICodeMessageIDInvalid,
+		errs.APICodeEventIDInvalid,
+		errs.APICodeEventIDExpired,
+		errs.APICodeEventReplyUnsupported,
+		errs.APICodePassiveReplyLimit,
+		errs.APICodeLegacyMessageIDExpired,
+		errs.APICodeLegacyMsgIDInvalid,
+		errs.APICodeLegacyMsgExpired,
+		errs.APICodeLegacyNotAtBot:
+		return true
+	}
+	text := errorText(err)
+	hasID := strings.Contains(text, "msg_id") || strings.Contains(text, "event_id") || strings.Contains(text, "被动回复")
+	hasReason := strings.Contains(text, "过期") || strings.Contains(text, "invalid") ||
+		strings.Contains(text, "expired") || strings.Contains(text, "越权") ||
+		strings.Contains(text, "超限") || strings.Contains(text, "不能回复") ||
+		strings.Contains(text, "不支持")
+	return hasID && hasReason
+}
+
+func isTransientSendError(err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	switch errorCode(err) {
+	case errs.CodeEmptyResponse,
+		errs.APICodeMediaTransferFailed,
+		errs.APICodeSendServerError,
+		errs.APICodeC2CSendServerError,
+		errs.APICodeArkSendServerError,
+		500, 502, 503, 504:
+		return true
+	}
+	text := errorText(err)
+	return strings.Contains(text, "timeout") ||
+		strings.Contains(text, "timed out") ||
+		strings.Contains(text, "connection reset") ||
+		strings.Contains(text, "connection refused") ||
+		strings.Contains(text, "eof") ||
+		strings.Contains(text, "temporarily unavailable") ||
+		strings.Contains(text, "稍后重试")
+}
+
+func errorCode(err error) int {
+	return errs.Error(err).Code()
+}
+
+func errorText(err error) string {
+	return strings.ToLower(errs.Error(err).Text())
+}
+
+func sleepContext(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func decodeMessage(resp *resty.Response, err error) (*dto.Message, error) {
 	if err != nil {
 		return nil, err
 	}
-	return resp.Result().(*dto.Message), nil
+	if isEmptyBody(resp) {
+		return nil, errs.ErrEmptyResponse
+	}
+	result, ok := resp.Result().(*dto.Message)
+	if !ok || result == nil {
+		return nil, errs.ErrEmptyResponse
+	}
+	return result, nil
+}
+
+func decodeMedia(resp *resty.Response, err error) (*dto.Media, error) {
+	if err != nil {
+		return nil, err
+	}
+	if isEmptyBody(resp) {
+		return nil, errs.ErrEmptyResponse
+	}
+	result, ok := resp.Result().(*dto.Media)
+	if !ok || result == nil {
+		return nil, errs.ErrEmptyResponse
+	}
+	return result, nil
+}
+
+func decodeStreamMessage(resp *resty.Response, err error) (*dto.StreamMessageResp, error) {
+	if err != nil {
+		return nil, err
+	}
+	if isEmptyBody(resp) {
+		return nil, errs.ErrEmptyResponse
+	}
+	result, ok := resp.Result().(*dto.StreamMessageResp)
+	if !ok || result == nil {
+		return nil, errs.ErrEmptyResponse
+	}
+	return result, nil
+}
+
+func isEmptyBody(resp *resty.Response) bool {
+	if resp == nil {
+		return true
+	}
+	body := bytes.TrimSpace(resp.Body())
+	return len(body) == 0 || bytes.Equal(body, []byte("null"))
 }
 
 func toJSON(v interface{}) string {

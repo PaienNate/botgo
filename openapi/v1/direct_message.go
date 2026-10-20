@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/sealdice/botgo/dto"
+	"github.com/sealdice/botgo/errs"
 	"github.com/sealdice/botgo/openapi/options"
 )
 
@@ -25,16 +26,20 @@ func (o *openAPI) CreateDirectMessage(ctx context.Context,
 // PostDirectMessage 在私信频道内发消息
 func (o *openAPI) PostDirectMessage(ctx context.Context,
 	dm *dto.DirectMessage, msg *dto.MessageToCreate, opt ...options.Option) (*dto.Message, error) {
-	reqCMD := o.request(ctx).
-		SetResult(dto.Message{}).
-		SetPathParam("guild_id", dm.GuildID).
-		SetBody(msg)
-
-	resp, err := baseRequest(ctx, reqCMD, http.MethodPost, o.getURL(dmsURI), opt...)
-	if err != nil {
-		return nil, err
+	if msg == nil {
+		return nil, errs.ErrNilMessage
 	}
-	return resp.Result().(*dto.Message), nil
+	msg = prepareChannelMessage(msg)
+	opts := getOptions(ctx, opt...)
+	send := func(m dto.APIMessage) (*dto.Message, error) {
+		reqCMD := o.request(ctx).
+			SetResult(dto.Message{}).
+			SetPathParam("guild_id", dm.GuildID).
+			SetBody(m)
+		resp, err := baseRequest(ctx, reqCMD, http.MethodPost, o.getURL(dmsURI), opt...)
+		return decodeMessage(resp, err)
+	}
+	return sendMessageWithFallback(ctx, msg, opts, send)
 }
 
 // RetractDMMessage 撤回私信消息

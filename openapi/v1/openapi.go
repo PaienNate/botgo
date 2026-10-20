@@ -2,11 +2,14 @@
 package v1
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-resty/resty/v2" // resty 是一个优秀的 rest api 客户端，可以极大的减少开发基于 rest 标准接口求请求 of 封装工作量
@@ -133,6 +136,12 @@ func (o *openAPI) setupClient(appID string) {
 					o.handleError(resp)
 					return errs.New(resp.StatusCode(), string(resp.Body()), traceID)
 				}
+				// 官方部分接口会以 HTTP 200 + err_code/code 返回业务错误。
+				// 如果不解析，调用方会把失败当成功，媒体上传、被动回复过期等都会静默丢消息。
+				if code, message, ok := parseBusinessError(resp.Body()); ok {
+					o.handleError(resp)
+					return errs.New(code, message, traceID)
+				}
 				return nil
 			},
 		)
@@ -151,37 +160,66 @@ func (o *openAPI) GetAppID() string {
 	return o.appID
 }
 
-// errBody 请求出错情况下的body结构
-type errBody struct {
-	Message string `json:"message"`  // 错误原因
-	Code    int    `json:"code"`     // 错误码，后续废弃
-	ErrCode int    `json:"err_code"` // 错误码
-	TraceID string `json:"trace_id"` // 服务端traceID, 用于问题排查
-}
-
 // handleError 处理openapi调用失败的情况
 func (o *openAPI) handleError(resp *resty.Response) {
-	var b errBody
-	err := json.Unmarshal(resp.Body(), &b)
-	if err != nil {
-		log.Errorf("parse errBody fail, err:%v, body:%s", err, string(resp.Body()))
+	code, _, ok := parseBusinessError(resp.Body())
+	if !ok {
 		return
 	}
-	if b.ErrCode == errs.APICodeTokenExpireOrNotExist || b.Code == errs.APICodeTokenExpireOrNotExist {
+	if code == errs.APICodeTokenExpireOrNotExist {
 		log.Errorf("token expire or not exist, force refresh token")
 		forceRefreshToken(o.tokenSource)
 	}
+}
+
+// parseBusinessError 解析 HTTP 200 响应体中的业务错误码。
+// 官方错误体通常为 {"err_code":40034005,"message":"...","trace_id":"..."}，
+// 部分旧接口使用 {"code":...}。
+func parseBusinessError(body []byte) (int, string, bool) {
+	body = bytes.TrimSpace(body)
+	if len(body) == 0 || body[0] != '{' {
+		return 0, "", false
+	}
+	var b struct {
+		Message string          `json:"message"`
+		Code    json.RawMessage `json:"code"`
+		ErrCode json.RawMessage `json:"err_code"`
+	}
+	if err := json.Unmarshal(body, &b); err != nil {
+		return 0, "", false
+	}
+	code := parseErrorCode(b.ErrCode)
+	if code == 0 {
+		code = parseErrorCode(b.Code)
+	}
+	if code == 0 {
+		return 0, "", false
+	}
+	message := b.Message
+	if message == "" {
+		message = string(body)
+	}
+	return code, message, true
+}
+
+func parseErrorCode(raw json.RawMessage) int {
+	if len(raw) == 0 {
+		return 0
+	}
+	text := strings.Trim(strings.TrimSpace(string(raw)), `"`)
+	code, err := strconv.Atoi(text)
+	if err != nil {
+		return 0
+	}
+	return code
 }
 
 func isTokenExpiredResponse(resp *resty.Response) bool {
 	if resp == nil {
 		return false
 	}
-	var b errBody
-	if err := json.Unmarshal(resp.Body(), &b); err != nil {
-		return false
-	}
-	return b.ErrCode == errs.APICodeTokenExpireOrNotExist || b.Code == errs.APICodeTokenExpireOrNotExist
+	code, _, ok := parseBusinessError(resp.Body())
+	return ok && code == errs.APICodeTokenExpireOrNotExist
 }
 
 func forceRefreshToken(tokenSource oauth2.TokenSource) {

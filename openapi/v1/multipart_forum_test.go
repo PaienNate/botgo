@@ -27,6 +27,9 @@ func TestPostMessageMultipart(t *testing.T) {
 		if got := r.FormValue("msg_id"); got != "msg-1" {
 			t.Errorf("msg_id = %q", got)
 		}
+		if got := r.FormValue("message_reference"); got != "" {
+			t.Errorf("message_reference should be omitted when file_image is present, got %q", got)
+		}
 		file, header, err := r.FormFile("file_image")
 		if err != nil {
 			t.Errorf("FormFile: %v", err)
@@ -47,14 +50,43 @@ func TestPostMessageMultipart(t *testing.T) {
 
 	api := (&openAPI{}).Setup("app", &retryTokenSource{}, false).WithTimeout(3 * time.Second)
 	msg, err := api.(openapi.FormFileAPI).PostMessageMultipart(context.Background(), "channel", &dto.MessageToCreate{
-		Content: "hi",
-		MsgID:   "msg-1",
+		Content:          "hi",
+		MsgID:            "msg-1",
+		MessageReference: &dto.MessageReference{MessageID: "REFIDX_ref"},
 	}, fileData, options.WithURL(server.URL))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if msg == nil || msg.ID != "msg-1" {
 		t.Fatalf("unexpected message: %+v", msg)
+	}
+}
+
+func TestPostMessageDropsMsgTypeForChannel(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode body: %v", err)
+			return
+		}
+		if _, ok := body["msg_type"]; ok {
+			t.Errorf("channel message should not contain msg_type: %#v", body)
+		}
+		if _, ok := body["markdown"]; !ok {
+			t.Errorf("channel message should keep markdown: %#v", body)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"msg-1"}`))
+	}))
+	defer server.Close()
+
+	api := (&openAPI{}).Setup("app", &retryTokenSource{}, false).WithTimeout(3 * time.Second)
+	_, err := api.PostMessage(context.Background(), "channel", &dto.MessageToCreate{
+		MsgType:  dto.MarkdownMsg,
+		Markdown: &dto.Markdown{Content: "**hi**"},
+	}, options.WithURL(server.URL))
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 

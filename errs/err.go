@@ -20,6 +20,10 @@ var (
 	ErrNotFoundOpenAPI = New(CodeNotFoundOpenAPI, "not found openapi version")
 	// ErrPagerIsNil 分页器为空
 	ErrPagerIsNil = New(CodePagerIsNil, "pager is nil")
+	// ErrEmptyResponse 接口返回成功状态码但响应体为空，无法确认操作是否生效。
+	ErrEmptyResponse = New(CodeEmptyResponse, "empty response body")
+	// ErrNilMessage 消息体为空
+	ErrNilMessage = New(CodeNilMessage, "message is nil")
 )
 
 // sdk 错误码
@@ -36,6 +40,10 @@ const (
 	CodeConnCloseCantIdentify = 9006
 	// CodePagerIsNil 分页器为空
 	CodePagerIsNil = 9007
+	// CodeEmptyResponse 成功响应体为空
+	CodeEmptyResponse = 9008
+	// CodeNilMessage 消息体为空
+	CodeNilMessage = 9009
 )
 
 // websocket错误码
@@ -62,6 +70,37 @@ const (
 // openapi错误码
 const (
 	APICodeTokenExpireOrNotExist = 11244 // token过期或者不存在
+
+	// 被动回复相关错误：msg_id/event_id 过期、越权或不支持回复。
+	APICodeMessageIDExpired       = 40034005 // 回复消息 msg_id 已过期
+	APICodeMessageIDInvalid       = 40034024 // msg_id 无效或越权
+	APICodeEventIDInvalid         = 40034025 // event_id 无效
+	APICodeEventIDExpired         = 40034026 // event_id 已过期
+	APICodeEventReplyUnsupported  = 40034027 // 该事件不支持回复消息
+	APICodePassiveReplyLimit      = 40034128 // 被动回复时间或次数超限
+	APICodeLegacyMessageIDExpired = 304103   // 消息 ID 已过期，不能回复
+	APICodeLegacyMsgIDInvalid     = 304026   // 回复的消息 id 错误
+	APICodeLegacyMsgExpired       = 304027   // 回复的消息过期
+	APICodeLegacyNotAtBot         = 304028   // 非 At 当前用户的消息不允许回复
+
+	// 消息去重：同一 msg_id + msg_seq 重复发送。
+	APICodeMessageDedup = 40054005
+
+	// Markdown 权限或内容错误。
+	APICodeMarkdownNotAllowed    = 50056
+	APICodeMarkdownInvalid       = 40034011
+	APICodeMarkdownParamInvalid  = 40034008
+	APICodeMarkdownNewline       = 40034009
+	APICodeMarkdownSyntaxInParam = 40034010
+	APICodeMarkdownNoTemplate    = 40034127
+	APICodeMarkdownParamError    = 40034124
+	APICodeLegacyMarkdownNoPerm  = 304036
+
+	// 可重试的服务端/媒体转存错误。
+	APICodeMediaTransferFailed = 40034004
+	APICodeSendServerError     = 50055001
+	APICodeC2CSendServerError  = 50055002
+	APICodeArkSendServerError  = 50055006
 )
 
 // Err sdk err
