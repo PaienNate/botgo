@@ -235,3 +235,17 @@ AstrBot 会把 `<faceType=...>` 中的 base64 `ext` 解码成 `[表情:xxx]`。
 - `go vet ./...`：clean
 - `go test -short ./...`：全绿
 - SealDice 临时 worktree：`go build ./...` 通过，`go test ./dice -run OfficialQQ` 通过，仅有 go.mod/go.sum 变化
+
+## 日志可观测性改进
+
+SealDice 当前的 `DummyLogger` 只转发 `Warn` / `Error`，会丢弃 `Info` / `Debug`。
+这意味着以前只在 `respInfo` Info 日志里出现的业务错误，SealDice 用户是看不到的。
+
+因此本次同时补了日志：
+
+- HTTP 200 + `err_code`：记录 `Warn`，包含 `app`、方法、路径、状态、业务码、trace、平台 message。
+- 消息最终发送失败：记录 `Error`，包含 `app`、目标（group/c2c/channel/dm）、`msg_id`/`event_id`、错误码、trace、已执行的自动降级动作，以及排查建议。
+- 自动降级成功：记录 `Warn`，明确说明“已自动降级”，并提示持续出现时要检查的权限/配额/内容问题。
+- Webhook 处理失败：记录 `Error`，包含 `app`、`event_id`、事件类型；panic 时附带堆栈。
+- Token 获取/刷新失败：日志加上 `app` 和 trace，避免多账号时无法定位。
+- `respInfo` 的请求/响应体做脱敏和截断，避免把消息正文、媒体 base64、token、签名写进 Info 日志。
