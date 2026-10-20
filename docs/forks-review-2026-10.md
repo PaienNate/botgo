@@ -174,3 +174,42 @@ Ret int `json:"ret,omitempty"` // 超过主动限制返回 22009
 - `go test -short ./...`：全绿
 - `go vet ./...`：clean
 - SealDice `go build ./...` + `go test ./dice -run OfficialQQ`：通过
+
+## 追加：官方重复推送与去重策略（网上核对）
+
+### 官方行为
+
+- 官方明确说明：为保证可达，**相同 msg_id 可能重复推送**。
+- `GROUP_AT_MESSAGE_CREATE` / `C2C_MESSAGE_CREATE` 文档都写了：
+  > 为确保消息可达，相同 msg_id 可能重复推送，开发者需结合 msg_seq 做去重。
+- AstrBot 的线上问题与修复（PR #6320）也确认：
+  - QQ Webhook 超时后会重试，最多 3 次
+  - 重试携带**相同顶层 id**
+  - 不去重会导致同一条消息处理 2~3 次
+
+### 结论
+
+这不是“官方实现写错了”，而是官方语义是 **at-least-once**，去重责任在 SDK/业务侧。
+
+botgo-plus 用 `payload.Data` 的 hash 去重，是一种**兜底策略**：
+
+- 优点：不依赖事件类型、不依赖顶层 id 是否存在
+- 缺点：
+  - 对“无 id 且 payload 完全相同”的合法事件有误杀风险
+  - 需要存完整 payload 或 hash，增加内存/清理逻辑
+  - 没有利用官方更精确的 `msg_id` / `event id`
+
+### 我们的改进
+
+不采用 payload hash，而是使用**双 key 去重**：
+
+- 顶层 `event id`
+- 消息事件的 `d.id`（即官方说的 msg_id）
+
+任一 key 命中即视为重复：
+
+- Webhook 重试：顶层 id 相同，直接命中
+- 同一条消息换 event id 重推：`d.id` 相同，仍然命中
+- 不会因为两条无 id 但 payload 相同的合法事件被误杀
+
+实现位于 `internal/dedup`，WS 与 Webhook 共用。

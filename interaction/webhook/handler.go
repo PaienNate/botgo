@@ -9,6 +9,7 @@ import (
 	"github.com/sealdice/botgo/dto"
 	"github.com/sealdice/botgo/event"
 	"github.com/sealdice/botgo/interaction/signature"
+	"github.com/sealdice/botgo/internal/dedup"
 	"github.com/sealdice/botgo/log"
 	"github.com/sealdice/botgo/token"
 )
@@ -144,23 +145,19 @@ func (h *Handler) handleValidation(w http.ResponseWriter, r *http.Request, paylo
 }
 
 func (h *Handler) handleDispatch(w http.ResponseWriter, payload *dto.WSPayload) {
-	eventID := payload.EventID
-	if h.opts.Deduper != nil && eventID != "" && h.opts.Deduper.Seen(eventID) {
+	dedupKeys := dedup.Keys(payload)
+	if dedup.SeenAny(h.opts.Deduper, dedupKeys) {
 		writeJSON(w, http.StatusOK, GenDispatchACK(true))
 		return
 	}
 
 	if h.opts.AckMode == AckAsync {
-		if h.opts.Deduper != nil && eventID != "" {
-			h.opts.Deduper.Mark(eventID)
-		}
+		dedup.MarkAll(h.opts.Deduper, dedupKeys)
 		writeJSON(w, http.StatusOK, GenDispatchACK(true))
 		go func() {
 			if err := dispatch(payload); err != nil {
 				h.reportError(err)
-				if h.opts.Deduper != nil && eventID != "" {
-					h.opts.Deduper.Unmark(eventID)
-				}
+				dedup.UnmarkAll(h.opts.Deduper, dedupKeys)
 			}
 		}()
 		return
@@ -171,9 +168,7 @@ func (h *Handler) handleDispatch(w http.ResponseWriter, payload *dto.WSPayload) 
 		writeJSON(w, http.StatusOK, GenDispatchACK(false))
 		return
 	}
-	if h.opts.Deduper != nil && eventID != "" {
-		h.opts.Deduper.Mark(eventID)
-	}
+	dedup.MarkAll(h.opts.Deduper, dedupKeys)
 	writeJSON(w, http.StatusOK, GenDispatchACK(true))
 }
 

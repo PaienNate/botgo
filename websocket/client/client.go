@@ -21,6 +21,7 @@ import (
 	"github.com/sealdice/botgo/dto"
 	"github.com/sealdice/botgo/errs"
 	"github.com/sealdice/botgo/event"
+	"github.com/sealdice/botgo/internal/dedup"
 	"github.com/sealdice/botgo/log"
 	"github.com/sealdice/botgo/websocket"
 )
@@ -123,6 +124,13 @@ func (d *messageDeduper) Mark(eventID string) {
 		return
 	}
 	d.cache.Set(eventID, struct{}{}, d.ttl)
+}
+
+func (d *messageDeduper) Unmark(eventID string) {
+	if d == nil || eventID == "" {
+		return
+	}
+	d.cache.Delete(eventID)
 }
 
 func (d *messageDeduper) Stop() {
@@ -446,8 +454,9 @@ func (c *Client) listenMessageAndHandle() {
 }
 
 func (c *Client) handlePayload(payload *dto.WSPayload) {
-	// 去重：已经成功处理过的事件，直接推进 seq，不再投递。
-	if c.deduper.Seen(payload.EventID) {
+	// 去重：同时使用顶层 event id 和消息体 d.id（msg_id）。
+	dedupKeys := dedup.Keys(payload)
+	if dedup.SeenAny(c.deduper, dedupKeys) {
 		log.Debugf("%s duplicate event %s, skip", c.session, payload.EventID)
 		c.saveSeq(payload.Seq)
 		return
@@ -474,7 +483,7 @@ func (c *Client) handlePayload(payload *dto.WSPayload) {
 		return
 	}
 
-	c.deduper.Mark(payload.EventID)
+	dedup.MarkAll(c.deduper, dedupKeys)
 	if c.seqPolicy == SeqAfterHandle {
 		c.saveSeq(payload.Seq)
 	}

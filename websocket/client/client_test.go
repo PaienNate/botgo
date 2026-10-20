@@ -248,6 +248,46 @@ func TestHandlePayloadDedup(t *testing.T) {
 	}
 }
 
+func TestHandlePayloadDedupByMessageID(t *testing.T) {
+	appID := fmt.Sprintf("dedup-msg-test-%d", time.Now().UnixNano())
+	var called int32
+	event.RegisterHandlersByAppID(appID, event.GroupATMessageEventHandler(
+		func(_ *dto.WSPayload, _ *dto.WSGroupATMessageData) error {
+			atomic.AddInt32(&called, 1)
+			return nil
+		},
+	))
+
+	c := (&Client{}).New(context.Background(), dto.Session{AppID: appID}).(*Client)
+	raw := []byte(`{
+		"op":0,
+		"t":"GROUP_AT_MESSAGE_CREATE",
+		"d":{
+			"id":"msg-1",
+			"content":"1d100",
+			"group_openid":"group-1",
+			"author":{"member_openid":"user-1"},
+			"timestamp":"2024-10-15T16:33:15+08:00"
+		}
+	}`)
+	for _, eventID := range []string{"event-1", "event-2"} {
+		payload := &dto.WSPayload{
+			WSPayloadBase: dto.WSPayloadBase{
+				OPCode:  dto.WSDispatchEvent,
+				Type:    dto.EventGroupAtMessageCreate,
+				EventID: eventID,
+				Seq:     2,
+			},
+			RawMessage: raw,
+			Session:    c.session,
+		}
+		c.handlePayload(payload)
+	}
+	if called != 1 {
+		t.Fatalf("handler called %d times, want 1", called)
+	}
+}
+
 func TestClientCloseCodeMapping(t *testing.T) {
 	tests := []struct {
 		name     string

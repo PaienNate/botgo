@@ -97,6 +97,45 @@ func TestHandlerDispatchACKAndDedup(t *testing.T) {
 	}
 }
 
+func TestHandlerDedupByMessageID(t *testing.T) {
+	appID := fmt.Sprintf("test-msg-dedup-%d", time.Now().UnixNano())
+	var called int32
+	event.RegisterHandlersByAppID(appID, event.GroupATMessageEventHandler(
+		func(_ *dto.WSPayload, _ *dto.WSGroupATMessageData) error {
+			atomic.AddInt32(&called, 1)
+			return nil
+		},
+	))
+
+	handler := NewHandler(HandlerOptions{
+		Credentials: &token.QQBotCredentials{AppID: appID, AppSecret: "secret"},
+		Deduper:     NewTTLDeduper(time.Minute, 100),
+	})
+	for _, eventID := range []string{"event-1", "event-2"} {
+		body := []byte(fmt.Sprintf(`{
+			"id":%q,
+			"op":0,
+			"t":"GROUP_AT_MESSAGE_CREATE",
+			"d":{
+				"id":"msg-1",
+				"content":"1d100",
+				"group_openid":"group-1",
+				"author":{"member_openid":"user-1"},
+				"timestamp":"2024-10-15T16:33:15+08:00"
+			}
+		}`, eventID))
+		req := signedRequest(t, body, "secret")
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rec.Code)
+		}
+	}
+	if called != 1 {
+		t.Fatalf("handler called %d times, want 1", called)
+	}
+}
+
 func TestHandlerInvalidSignature(t *testing.T) {
 	body := []byte(`{"id":"event-1","op":0,"t":"GROUP_AT_MESSAGE_CREATE","d":{}}`)
 	req := signedRequest(t, body, "wrong-secret")
