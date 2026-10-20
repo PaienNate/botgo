@@ -249,3 +249,37 @@ SealDice 当前的 `DummyLogger` 只转发 `Warn` / `Error`，会丢弃 `Info` /
 - Webhook 处理失败：记录 `Error`，包含 `app`、`event_id`、事件类型；panic 时附带堆栈。
 - Token 获取/刷新失败：日志加上 `app` 和 trace，避免多账号时无法定位。
 - `respInfo` 的请求/响应体做脱敏和截断，避免把消息正文、媒体 base64、token、签名写进 Info 日志。
+
+## Panic 隔离与全局兜底
+
+消息处理链路里，业务 handler 是最容易 panic 的地方。只在最外层 `recover` 会导致：
+
+- WebSocket：一条消息 panic 直接关闭整条连接，影响后续所有消息；
+- Webhook：panic 后返回可重试 ACK，平台重试时再次 panic，形成毒消息循环；
+- 异步 goroutine：panic 没有 `net/http` 兜底，会直接打崩进程；
+- 过滤器/观察者：原来的 `_ = recover()` 把 panic 静默吞掉，没有日志。
+
+本次补齐为分层兜底：
+
+1. `event.ParseAndHandle`
+   - 统一 recover 业务 handler panic，返回 `*event.PanicError`（含 `Scope`、`Value`、`Stack`）；
+   - 提供 `event.IsPanic(err)` 给分发层判断。
+2. WebSocket
+   - `handlePayload` 对 handler panic 记录 `Error`（含堆栈），标记去重并推进 seq，然后丢弃该事件；
+   - 后续消息继续处理，不再因为单条消息重连；
+   - 保留读循环最外层 recover 作为最后保险。
+3. Webhook
+   - `dispatch` 使用 `event.NewPanicError`；
+   - 同步路径 panic 后 ACK 成功并保留去重标记，避免确定性 panic 被平台无限重试；
+   - 异步路径增加 goroutine recover；
+   - 自定义 `ErrorHandler` panic 也会被捕获并记录原始错误。
+4. 过滤器/观察者
+   - `event` filter/observer panic 记录 `Error` + 堆栈，不再静默吞掉；
+   - OpenAPI 请求/响应过滤器 panic 转为 error 返回并记录，同时给过滤器链加读锁快照，避免并发注册/读取 map 触发 panic。
+5. 其它 goroutine
+   - token source 的 `Token()`、后台刷新协程、`RefreshErrorHandler`；
+   - remote session producer/consumer、分布式锁续期；
+   - gateway `Authorize` 回调；
+   - 均增加 recover，避免单个回调 panic 打崩进程。
+
+注意：`log.Logger` 是用户可替换的，SDK 假设 logger 本身不会 panic；如果自定义 logger 会 panic，仍需调用方自行保证。
