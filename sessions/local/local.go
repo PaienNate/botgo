@@ -132,14 +132,14 @@ func (l *ChanManager) newConnect(ctx context.Context, session dto.Session) {
 		err = wsClient.Identify()
 	}
 	if err != nil {
-		log.Errorf("[ws/session] Identify/Resume err %+v", err)
+		l.logSessionError("[ws/session] Identify/Resume", err)
 		terminal = l.handleSessionError(ctx, session, wsClient.Session(), err)
 		return
 	}
 
 	started := time.Now()
 	if err = wsClient.Listening(); err != nil {
-		log.Errorf("[ws/session] Listening err %+v", err)
+		l.logSessionError("[ws/session] Listening", err)
 		if time.Since(started) >= stableConnectionDuration {
 			l.resetBackoff(session)
 			wsClient.Session().AuthRetryCount = 0
@@ -153,6 +153,28 @@ func (l *ChanManager) newConnect(ctx context.Context, session dto.Session) {
 		return
 	}
 	l.requeue(ctx, session)
+}
+
+// logSessionError 将 QQ 网关要求续期/重连的预期事件降为 Warn，避免用户误以为是故障。
+func (l *ChanManager) logSessionError(prefix string, err error) {
+	if isExpectedReconnect(err) {
+		log.Warnf("%s: QQ 官方要求 WebSocket 重连（正常续期），正在自动恢复: %+v", prefix, err)
+		return
+	}
+	log.Errorf("%s err %+v", prefix, err)
+}
+
+func isExpectedReconnect(err error) bool {
+	if err == nil {
+		return false
+	}
+	switch errs.Error(err).Code() {
+	case errs.CodeNeedReConnect, errs.CodeConnCloseCantResume, errs.CodeInvalidSession,
+		errs.WSCodeBackendSessionTimeOut:
+		return true
+	default:
+		return false
+	}
 }
 
 func (l *ChanManager) handleSessionError(
