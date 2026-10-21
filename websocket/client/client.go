@@ -598,8 +598,7 @@ type gwsEventHandler struct {
 }
 
 func (h *gwsEventHandler) OnOpen(socket *gws.Conn) {
-	c := h.client
-	_ = socket.SetDeadline(time.Now().Add(c.pingInterval + c.pingWait))
+	h.refreshReadDeadline(socket)
 }
 
 func (h *gwsEventHandler) OnClose(_ *gws.Conn, err error) {
@@ -608,14 +607,15 @@ func (h *gwsEventHandler) OnClose(_ *gws.Conn, err error) {
 
 func (h *gwsEventHandler) OnPing(socket *gws.Conn, payload []byte) {
 	_ = socket.WritePong(payload)
-	_ = socket.SetDeadline(time.Now().Add(h.client.pingInterval + h.client.pingWait))
+	h.refreshReadDeadline(socket)
 }
 
 func (h *gwsEventHandler) OnPong(socket *gws.Conn, _ []byte) {
-	_ = socket.SetDeadline(time.Now().Add(h.client.pingInterval + h.client.pingWait))
+	h.refreshReadDeadline(socket)
 }
 
-func (h *gwsEventHandler) OnMessage(_ *gws.Conn, message *gws.Message) {
+func (h *gwsEventHandler) OnMessage(socket *gws.Conn, message *gws.Message) {
+	h.refreshReadDeadline(socket)
 	defer func() { _ = message.Close() }()
 
 	if message.Opcode != gws.OpcodeText {
@@ -642,6 +642,15 @@ func (h *gwsEventHandler) OnMessage(_ *gws.Conn, message *gws.Message) {
 	case c.messageQueue <- payload:
 	case <-c.queueDone:
 	}
+}
+
+// refreshReadDeadline 只刷新读 deadline。写操作由 Write 按次设置，避免 QQ 心跳
+// 在 45~60 秒的间隔下被连接建立时的全局 deadline 提前截断。
+func (h *gwsEventHandler) refreshReadDeadline(socket *gws.Conn) {
+	if socket == nil {
+		return
+	}
+	_ = socket.SetReadDeadline(time.Now().Add(h.client.pingInterval*2 + h.client.pingWait))
 }
 
 type gwsLogger struct{}
