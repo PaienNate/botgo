@@ -272,7 +272,9 @@ func (c *Client) Listening() error {
 			// 不处理错误，Write 内部会处理，如果发生发包异常，会通知主协程退出
 			_ = c.Write(heartBeatEvent)
 		case <-c.transportPingTicker.C:
-			// WebSocket 传输层心跳；如果对端不回 pong，deadline 会让 ReadLoop 退出。
+			// WebSocket 传输层心跳；控制帧也必须显式设置写 deadline，
+			// 否则会沿用上一次业务 Write 留下的已过期 deadline。
+			_ = c.conn.SetWriteDeadline(time.Now().Add(c.writeTimeout))
 			_ = c.conn.WritePing(nil)
 		}
 	}
@@ -606,6 +608,7 @@ func (h *gwsEventHandler) OnClose(_ *gws.Conn, err error) {
 }
 
 func (h *gwsEventHandler) OnPing(socket *gws.Conn, payload []byte) {
+	_ = socket.SetWriteDeadline(time.Now().Add(h.client.writeTimeout))
 	_ = socket.WritePong(payload)
 	h.refreshReadDeadline(socket)
 }
