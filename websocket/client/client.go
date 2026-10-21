@@ -309,6 +309,7 @@ func (c *Client) Resume() error {
 		log.Errorf("[resume] get access token failed:%s", err)
 		return err
 	}
+	log.Infof("%s resume with session_id=%s seq=%d", c.session, c.session.ID, c.session.LastSeq)
 	payload := &dto.WSPayload{
 		Data: &dto.WSResumeData{
 			Token:     token.AccessToken,
@@ -579,6 +580,7 @@ func (c *Client) readyHandler(payload *dto.WSPayload) {
 	}
 	c.version = readyData.Version
 	// 基于 ready 事件，更新 session 信息
+	log.Infof("%s READY session_id=%s", c.session, readyData.SessionID)
 	c.session.ID = readyData.SessionID
 	if len(readyData.Shard) >= 2 {
 		c.session.Shards.ShardID = readyData.Shard[0]
